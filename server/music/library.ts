@@ -1,19 +1,18 @@
 /**
  * Mahyar Music — shared music library.
  *
- * The library is the ONLY audio source for playback in this version. Members
- * upload files they own or are authorized to share with their private server;
- * audio bytes live in the private object bucket and only metadata lives in
- * PostgreSQL. There is no external search provider, no scraping and no
- * unauthorized downloading anywhere in the playback path.
+ * The library is the ONLY audio source for synchronized playback in this version.
+ * Members upload files they own or are authorized to share with their private
+ * server. Audio bytes live in the private Railway Bucket and only metadata is
+ * stored in PostgreSQL. Each browser reads the same signed media URL; the server
+ * never decodes or relays music audio during playback.
  *
- * Upload flow (per the master prompt §2.5):
- *   1. POST /api/music/upload/init   — auth, permission, format/size/quota checks,
- *                                      returns a short-lived presigned PUT URL.
- *   2. Browser PUTs the file straight into the bucket (never through Express).
- *   3. POST /api/music/upload/complete — backend verifies the object (HEAD + magic
- *                                      bytes + ffprobe), extracts artwork, then
- *                                      stores metadata in PostgreSQL.
+ * Upload flow:
+ *   1. POST /api/music/upload/init — auth, permission, format/size/quota checks.
+ *   2. Prefer direct browser PUT to a short-lived Railway Bucket URL.
+ *   3. If browser CORS blocks direct PUT, POST the same file to a same-origin
+ *      streaming relay. The relay uses bounded streaming and never buffers the file.
+ *   4. POST /api/music/upload/complete — verify object, inspect audio, then store metadata.
  *
  * Failures are honest: without storage configuration the endpoints answer 501
  * with the missing variable names, and invalid files are deleted from the
@@ -23,12 +22,13 @@ import { Express, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
+import { Transform } from 'stream';
 import { access, rm } from 'fs/promises';
 import path from 'path';
 import type { PrismaClient, MusicTrack } from '@prisma/client';
 import {
   storageConfig, missingStorageVariables, musicObjectKey, presignUpload,
-  headObject, downloadToTempFile, removeTempFile, deleteObject, putLocalFile,
+  headObject, downloadToTempFile, removeTempFile, deleteObject, putLocalFile, putObjectStream,
   getBucketCors, bucketCorsAllowsOrigin
 } from './storage';
 
@@ -44,9 +44,8 @@ const MAX_PLAYLIST_ITEMS = 200;
 const PENDING_TTL_MS = 15 * 60_000;
 
 /**
- * Formats the playback pipeline (ffmpeg decode → LiveKit) handles reliably.
- * MP3 is the primary format; the others are enabled because ffmpeg decodes
- * them everywhere the bot runs. Anything else is rejected with a clear message.
+ * Formats validated by ffprobe. MP3 is the primary browser playback format;
+ * actual playback support still depends on the visitor's browser and OS.
  */
 export const AUDIO_FORMATS: Record<string, { mime: string; label: string }> = {
   mp3: { mime: 'audio/mpeg', label: 'MP3' },
@@ -346,7 +345,7 @@ export function registerMusicLibrary(deps: LibraryDeps): void {
         },
         browser_uploads_possible: allowsOrigin,
         hint: allowsOrigin ? null
-          : 'The bucket has no CORS rule allowing PUT from this origin, so the browser cannot upload directly. Run: node --env-file-if-exists=.env scripts/bucket_cors.js --apply ' + origin
+          : 'The bucket does not allow direct browser PUT from this origin. The application should use its same-origin streaming upload fallback.'
       });
     } catch (error) { return next(error); }
   });
@@ -409,6 +408,67 @@ export function registerMusicLibrary(deps: LibraryDeps): void {
         suggested_artist: fallbackMeta.artist
       });
     } catch (error) { return next(error); }
+  });
+
+  /**
+   * Same-origin upload fallback for Railway Buckets whose CORS rules cannot be
+   * configured. The client sends the short-lived upload token in a header (never
+   * in the URL). The request is piped through a byte-counting Transform into S3;
+   * at most the SDK's bounded request buffers are resident, not the whole file.
+   */
+  app.post('/api/music/upload/stream', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    const tokenHeader = req.headers['x-upload-token'];
+    const token = Array.isArray(tokenHeader) ? tokenHeader[0] : String(tokenHeader || '');
+    const pending = token ? pendingUploads.get(token) : undefined;
+    let uploaded = false;
+    try {
+      if (!pending) return res.status(404).json({ error: 'Upload session not found or expired. Start the upload again.' });
+      if (pending.userId !== req.userId) return res.status(403).json({ error: 'This upload session belongs to another user.' });
+      if (pending.expiresAt <= Date.now()) {
+        pendingUploads.delete(token);
+        await deleteObject(pending.key);
+        return res.status(410).json({ error: 'Upload session expired. Start the upload again.' });
+      }
+      if (!await deps.isMember(req.userId!, pending.serverId)) return res.status(403).json({ error: 'You are no longer a member of this server.' });
+      if (!await deps.musicPermission(req.userId!, pending.serverId, 'upload')) return res.status(403).json({ error: 'You no longer have permission to upload music.' });
+      const contentLength = Number(req.headers['content-length'] || 0);
+      if (!Number.isSafeInteger(contentLength) || contentLength <= 0) return res.status(411).json({ error: 'Content-Length is required for streaming upload.' });
+      if (contentLength !== pending.declaredSize) return res.status(400).json({ error: 'Upload size does not match the initialized upload session.' });
+      if (contentLength > MAX_FILE_BYTES) return res.status(413).json({ error: `Audio files are limited to ${Math.round(MAX_FILE_BYTES / (1024 * 1024))} MB.`, code: 'FILE_TOO_LARGE' });
+      if (!storageConfig().ready) return res.status(503).json({ error: 'Railway Music Bucket is not configured.', code: 'MUSIC_STORAGE_NOT_CONFIGURED' });
+
+      let received = 0;
+      const guard = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          received += chunk.length;
+          if (received > pending!.declaredSize || received > MAX_FILE_BYTES) {
+            callback(Object.assign(new Error('Upload exceeded the declared file size.'), { code: 'UPLOAD_TOO_LARGE' }));
+            return;
+          }
+          callback(null, chunk);
+        },
+        flush(callback) {
+          if (received !== pending!.declaredSize) callback(new Error('Upload ended before all declared bytes were received.'));
+          else callback();
+        }
+      });
+      req.on('aborted', () => guard.destroy(new Error('Client aborted the upload.')));
+      req.pipe(guard);
+      await putObjectStream(pending.key, pending.mimeType, pending.declaredSize, guard);
+      uploaded = true;
+      const head = await headObject(pending.key);
+      if (!head || head.size !== pending.declaredSize) {
+        await deleteObject(pending.key);
+        return res.status(502).json({ error: 'The object store did not confirm the complete uploaded file.' });
+      }
+      return res.status(201).json({ ok: true, uploaded: true, bytes: received, upload_token_valid: true });
+    } catch (error: any) {
+      if (pending && !uploaded) await deleteObject(pending.key);
+      if (res.headersSent) return;
+      const message = error instanceof Error ? error.message : 'Streaming upload failed.';
+      if (/UPLOAD_TOO_LARGE/.test(String(error?.code))) return res.status(413).json({ error: 'The uploaded file exceeded its declared size.', code: 'FILE_TOO_LARGE' });
+      return res.status(502).json({ error: `Railway Bucket streaming upload failed: ${message}`, code: 'STORAGE_RELAY_FAILED' });
+    }
   });
 
   app.post('/api/music/upload/complete', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {

@@ -23,7 +23,7 @@ import type { PrismaClient } from '@prisma/client';
 import { MusicEngine } from './engine';
 import { MusicLibraryResolver, MusicTrack as PlayableTrack } from './types';
 import { registerMusicLibrary, libraryLimits } from './library';
-import { presignDownload } from './storage';
+import { presignDownload, storageConfig } from './storage';
 
 type AuthedRequest = Request & { userId?: string };
 
@@ -35,7 +35,6 @@ export interface MusicSystemDeps {
   canAccessChannel: (userId: string, channel: { id: string; serverId: string; isPrivate: boolean; type?: string }) => Promise<boolean>;
   serverPermission: (userId: string, serverId: string, permission: string) => Promise<boolean>;
   requireServerPermission: (userId: string, serverId: string, permission: string) => Promise<void>;
-  liveKit: { ok: boolean; apiKey?: string; apiSecret?: string; clientUrl?: string; status?: number; body?: unknown };
 }
 
 export interface MusicSystem {
@@ -45,17 +44,18 @@ export interface MusicSystem {
 
 const commandSchema = z.object({
   channel_id: z.string().min(1).max(64),
-  action: z.enum(['play', 'pick', 'search', 'pause', 'resume', 'skip', 'stop', 'queue', 'nowplaying']),
+  action: z.enum(['play', 'pick', 'search', 'pause', 'resume', 'skip', 'stop', 'queue', 'nowplaying', 'ended']),
   query: z.string().max(300).optional(),
-  track_id: z.string().max(200).optional()
+  track_id: z.string().max(200).optional(),
+  playback_id: z.string().max(80).optional()
 });
 
 export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
   const { app, io, prisma, auth } = deps;
 
-  // The engine exists only when LiveKit is fully configured; music commands report an
-  // honest configuration error otherwise (never a fake "playing" state).
-  const liveKitConfigured = deps.liveKit.ok;
+  // Synchronized browser playback does not require a LiveKit bot or server-side
+  // native audio runtime. It only requires the existing private Railway Bucket.
+  const musicStorageConfigured = storageConfig().ready;
 
   // ------------------------------------------------------------ permissions
 
@@ -136,10 +136,6 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
       });
       return row ? rowToPlayable(row) : null;
     },
-    async streamUrl(track) {
-      if (!track.storageKey) return null;
-      return presignDownload(track.storageKey);
-    },
     async playlistTracks(serverId, playlistId) {
       const playlist = await prisma.musicPlaylist.findFirst({ where: { id: playlistId, serverId }, select: { id: true } });
       if (!playlist) return [];
@@ -161,16 +157,9 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
 
   // ------------------------------------------------------------- engine
 
-  const engine = liveKitConfigured
+  const engine = musicStorageConfigured
     ? new MusicEngine({
         io,
-        liveKitUrl: deps.liveKit.clientUrl!,
-        apiKey: deps.liveKit.apiKey!,
-        apiSecret: deps.liveKit.apiSecret!,
-        isMusicEnabled: async (serverId) => {
-          const server = await prisma.server.findUnique({ where: { id: serverId }, select: { musicEnabled: true } });
-          return Boolean(server?.musicEnabled);
-        },
         library: libraryResolver
       })
     : null;
@@ -200,7 +189,7 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
         trackCount = count;
         usedBytes = Number(agg._sum?.fileSize || 0);
       }
-      return res.json({ ...libraryLimits(), track_count: trackCount, used_bytes: usedBytes, playback_configured: Boolean(engine) });
+      return res.json({ ...libraryLimits(), track_count: trackCount, used_bytes: usedBytes, playback_configured: Boolean(engine), player_mode: 'synchronized-browser' });
     } catch (error) { return next(error); }
   });
 
@@ -227,7 +216,7 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
       const allowed = await authorizeMusic(userId, channelId);
       if (!allowed.ok) return ack?.({ ok: false, error: allowed.error });
       if (!engine) {
-        return ack?.({ ok: false, error: 'Mahyar Music is not configured on this server (LiveKit credentials required).' });
+        return ack?.({ ok: false, error: 'Mahyar Music is not configured: connect the Railway Storage Bucket first.' });
       }
 
       try {
@@ -265,6 +254,11 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
           case 'stop': { const r = engine.stop({ channelId, serverId: allowed.serverId, userId }); return ack?.({ ok: r.ok, message: r.message, state: r.state }); }
           case 'queue': { const r = engine.queue({ channelId, serverId: allowed.serverId, userId }); return ack?.({ ok: r.ok, message: r.message, state: r.state }); }
           case 'nowplaying': { const r = engine.nowPlaying({ channelId, serverId: allowed.serverId, userId }); return ack?.({ ok: r.ok, message: r.message, state: r.state }); }
+          case 'ended': {
+            if (!trackId || !parsed.data.playback_id) return ack?.({ ok: false, error: 'Missing playback session information.' });
+            const r = await engine.ended({ channelId, serverId: allowed.serverId, userId, trackId, playbackId: parsed.data.playback_id });
+            return ack?.({ ok: r.ok, message: r.message, state: r.state });
+          }
           default:
             return ack?.({ ok: false, error: 'Unknown music command' });
         }
@@ -279,9 +273,17 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
       if (!channelId.length || channelId.length > 64) return ack?.({ ok: false });
       const allowed = await authorizeMusic(userId, channelId).catch(() => ({ ok: false as const }));
       if (!allowed.ok) return ack?.({ ok: false });
-      // Joining the channel room is enough; music:state is broadcast there.
-      socket.join(`channel:${channelId}`);
-      ack?.({ ok: true, state: engine ? engine.state(channelId) : null });
+      // Music subscription is independent from the chat channel room. A user may
+      // remain in Voice while browsing another text channel.
+      await socket.join(`music:${channelId}`);
+      ack?.({ ok: true, state: engine ? engine.state(channelId, allowed.serverId) : null });
+    });
+
+    socket.on('music:unsubscribe', async (rawChannelId: unknown, ack?: (result: unknown) => void) => {
+      const channelId = String(rawChannelId || '');
+      if (!channelId.length || channelId.length > 64) return ack?.({ ok: false });
+      await socket.leave(`music:${channelId}`);
+      ack?.({ ok: true });
     });
 
     // Queue an entire shared playlist into a voice channel from the library UI.
@@ -290,7 +292,7 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
       if (!parsed.success) return ack?.({ ok: false, error: 'Invalid playlist play request' });
       const allowed = await authorizeMusic(userId, parsed.data.channel_id);
       if (!allowed.ok) return ack?.({ ok: false, error: allowed.error });
-      if (!engine) return ack?.({ ok: false, error: 'Mahyar Music is not configured on this server (LiveKit credentials required).' });
+      if (!engine) return ack?.({ ok: false, error: 'Mahyar Music is not configured: connect the Railway Storage Bucket first.' });
       try {
         const result = await engine.playPlaylist({ channelId: parsed.data.channel_id, serverId: allowed.serverId, userId, playlistId: parsed.data.playlist_id });
         return ack?.({ ok: result.ok, message: result.message, state: result.state, error: result.ok ? undefined : result.message });
@@ -308,7 +310,31 @@ export function registerMusicSystem(deps: MusicSystemDeps): MusicSystem {
     const allowed = await authorizeMusic(req.userId!, channelId).catch(() => null);
     if (!allowed || !allowed.ok) return res.status(403).json({ error: 'You cannot view music state for this channel' });
     if (!engine) return res.json({ configured: false, state: null });
-    return res.json({ configured: true, state: engine.state(channelId) });
+    return res.json({ configured: true, state: engine.state(channelId, allowed.serverId) });
+  });
+
+  // Each authorized browser receives a short-lived private media URL. Playback is
+  // performed by a native HTMLAudioElement (no Web Audio graph / CORS access needed).
+  app.get('/api/music/playback-url', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const channelId = String(req.query.channel_id || '');
+      const trackId = String(req.query.track_id || '');
+      if (!channelId || channelId.length > 64 || !trackId || trackId.length > 64) {
+        return res.status(400).json({ error: 'channel_id and track_id are required' });
+      }
+      const allowed = await authorizeMusic(req.userId!, channelId);
+      if (!allowed.ok) return res.status(allowed.status).json({ error: allowed.error });
+      if (!storageConfig().ready) return res.status(503).json({ error: 'Railway Music Bucket is not configured.' });
+
+      const track = await libraryResolver.getPlayableTrack(allowed.serverId, trackId);
+      if (!track?.storageKey || !track.streamable) return res.status(404).json({ error: 'This track is not available in the server library.' });
+
+      // 60-minute URL: long enough for ordinary tracks; the client requests a new
+      // URL each time a different track starts. Never log or persist this URL.
+      const url = await presignDownload(track.storageKey, 3600);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ url, expires_at: Date.now() + 3600_000, track_id: trackId });
+    } catch (error) { return next(error); }
   });
 
   // ----------------------------------------------------------- REST writes

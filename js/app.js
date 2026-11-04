@@ -40,7 +40,7 @@ const DELEGATED_ACTIONS = new Set([
   'removeAvatar', 'setTheme', 'setMotion', 'openUserContextMenu',
   'openChannelEditModal', 'editChannel', 'openInviteManager', 'createServerInvite', 'revokeInvite',
   'openGroupSettings', 'renameGroupConversation', 'pickAttachment', 'toggleDesktopNotifications', 'copyText',
-  'musicPause', 'musicResume', 'musicSkip', 'musicStop', 'musicOpenQueue', 'musicCommandHelp',
+  'musicPause', 'musicResume', 'musicSkip', 'musicStop', 'musicOpenQueue', 'musicCommandHelp', 'musicEnableAudio',
   'applySlashCompletion', 'hideSlashMenu', 'pickSearchResult', 'openSearchPicker', 'closeSearchPicker',
   'toggleMusicPanel', 'selectAuthTab', 'togglePasswordVisibility',
   'musicOpenLibrary', 'musicLibrarySearch', 'setMusicLibraryTab', 'musicUploadPick', 'musicLibraryUploadFiles',
@@ -117,6 +117,7 @@ class MahyarGapApp {
     // Mahyar Music: client module owns the /mp command catalog and per-channel state.
     this.music = new window.MahyarMusic(this.api);
     this.music.onState((state) => this.onMusicState(state));
+    this.musicSubscriptionChannelId = null;
     this.slashMenu = null;      // { items, active } — /mp autocomplete in the composer
     this.searchPicker = null;   // { channelId, tracks } — interactive result picker
     this.musicProgressTimer = null;
@@ -209,8 +210,7 @@ class MahyarGapApp {
         return;
       }
       if (packet?.type === 'music_state') {
-        // handled by the MahyarMusic module (registered in the constructor); the callback
-        // already re-rendered what is visible. Nothing else to reconcile.
+        this.music.handleState(packet.payload);
         return;
       }
       if (packet?.type === 'music_library_updated') {
@@ -232,7 +232,26 @@ class MahyarGapApp {
         return;
       }
       if (this.applyRealtimePacket(packet)) {
-        this.renderAll();
+        const type = packet.type;
+        const payload = packet.payload || {};
+        if (type === 'voice_updated') {
+          // Voice/presence changes must never rebuild the message composer.
+          this.renderLeftSidebar();
+          this.renderRightSidebar();
+          this.renderVoiceConnectionBar();
+          this.refreshVoiceRegion(false);
+          this.attachLiveVideoStreams();
+        } else {
+          const isDirect = type.startsWith('direct_message_');
+          const activeChannel = this.getActiveChannel();
+          const isVisible = isDirect
+            ? this.state.viewMode === 'dms' && this.state.dmSubView === 'conversation' && payload.conversation_id === this.state.activeDmConversationId
+            : activeChannel && payload.channel_id === activeChannel.id;
+          if (isVisible) this.refreshMessageViewport();
+          this.renderLeftSidebar();
+          this.renderServerRail();
+          this.updateDocumentTitle();
+        }
         return;
       }
       await this.loadAllData();
@@ -628,7 +647,10 @@ class MahyarGapApp {
       try {
         const users = await this.api.list('users', { limit: 100 });
         this.state.users = users;
-        this.renderAll();
+        // Updating the directory must not replace the message composer or steal focus.
+        this.renderLeftSidebar();
+        this.renderRightSidebar();
+        this.renderServerRail();
       } catch (_) { /* transient failure keeps the current directory */ }
     }, 300);
   }
@@ -761,12 +783,8 @@ class MahyarGapApp {
   getVoiceParticipants(channelId) {
     const sessions = this.state.voiceSessions.filter((session) => session.channel_id === channelId);
     const liveIds = this.getLiveVoiceParticipantIds(channelId);
-    // The bot is a real LiveKit participant but has no voice_session row; its presence
-    // comes from the music state, so every viewer sees it — connected or not.
-    const musicState = this.music?.stateFor(channelId);
-    const botIdentity = musicState?.bot_connected ? musicState.bot_identity : null;
     if (!liveIds.length) {
-      const mapped = sessions.map((session) => ({
+      return sessions.map((session) => ({
         ...session,
         muted: Boolean(session.muted),
         deafened: Boolean(session.deafened),
@@ -774,10 +792,8 @@ class MahyarGapApp {
         screen_sharing: Boolean(session.screen_sharing),
         live: false
       }));
-      if (botIdentity) mapped.push({ id: `bot_${botIdentity}`, user_id: botIdentity, channel_id: channelId, muted: false, deafened: false, video_enabled: false, screen_sharing: false, speaking: false, quality: 'unknown', live: false, bot: true });
-      return mapped;
     }
-    const mappedLive = liveIds.map((identity) => {
+    return liveIds.map((identity) => {
       const session = sessions.find((row) => row.user_id === identity);
       const meta = this.rtc.getParticipantState(identity);
       return {
@@ -793,73 +809,72 @@ class MahyarGapApp {
         live: true
       };
     });
-    if (botIdentity && !mappedLive.some((p) => p.user_id === botIdentity)) {
-      mappedLive.push({ id: `bot_${botIdentity}`, user_id: botIdentity, channel_id: channelId, muted: false, deafened: false, video_enabled: false, screen_sharing: false, speaking: false, quality: 'unknown', live: true, bot: true });
-    }
-    return mappedLive;
   }
 
   // =========================================================================
-  // Mahyar Music — real Discord-style music bot client
+  // Mahyar Music — synchronized browser player (Voice remains on LiveKit)
   // =========================================================================
 
-  /** LiveKit identity of the Mahyar Music bot for a room. */
-  isMusicBotIdentity(identity) {
-    return window.MahyarMusic.isBotIdentity(identity);
-  }
-
-  /**
-   * The voice channel music commands currently target:
-   * the room this user is connected to, else the voice channel being viewed.
-   */
+  /** Music commands are scoped to the Voice room this browser has actually joined. */
   musicTargetChannelId() {
-    if (this.rtc.mode === 'voice' && this.rtc.activeChannelId) return this.rtc.activeChannelId;
-    const active = this.getActiveChannel();
-    if (active && active.type === 'voice') return active.id;
-    return null;
+    return this.rtc.mode === 'voice' && this.rtc.connectionStatus === 'connected' && this.rtc.room
+      ? this.rtc.activeChannelId
+      : null;
   }
 
   onMusicState(state) {
     if (!state || typeof state.channel_id !== 'string') return;
-    // The MahyarMusic module already stored the state; re-render the surfaces that show it.
-    const active = this.getActiveChannel();
-    const theaterOpen = active && (active.id === state.channel_id) && (active.type === 'voice' || (this.rtc.activeChannelId === state.channel_id && this.state.voiceStageExpanded));
-    if (theaterOpen) this.renderMainStage();
-    this.renderVoiceConnectionBar();
+    // Update only the music surfaces. Never rebuild the chat stage when a song,
+    // queue, or local autoplay permission changes.
+    const panel = Array.from(document.querySelectorAll('[data-music-panel]'))
+      .find((element) => element.dataset.musicPanel === state.channel_id);
+    if (panel) panel.outerHTML = this.renderMusicPanel(state.channel_id, state);
+    this.renderLeftSidebar();
     if (this.state.activeModal === 'musicQueue') this.renderModals();
-    if (this.state.contextMenu?.identity?.startsWith('mahyar-music:')) this.renderContextMenu();
+    if (this.state.contextMenu?.identity?.startsWith('mahyar-music-player:')) this.renderContextMenu();
   }
 
-  /** Synthetic display user for the bot (never a real account). */
-  musicBotUser() {
-    return {
-      id: 'mahyar-music',
-      display_name: 'Mahyar Music',
-      username: 'mahyar-music',
-      avatar_color: '#7C5CFF',
-      bot: true
-    };
+  isMusicPlayerIdentity(identity) {
+    return window.MahyarMusic.isPlayerIdentity(identity);
   }
 
-  /** Compact now-playing panel for the voice theater. */
-  renderMusicPanel(channelId) {
-    const state = this.music.stateFor(channelId);
-    const visible = state && (state.now_playing || state.queue.length > 0 || state.bot_connected || state.last_error);
+  /** The music player is active only while this browser is actually in Voice. */
+  async syncMusicSubscription() {
+    const next = this.rtc.mode === 'voice' && this.rtc.activeChannelId && this.rtc.room && this.rtc.connectionStatus !== 'disconnected'
+      ? this.rtc.activeChannelId
+      : null;
+    const previous = this.musicSubscriptionChannelId;
+    this.music.setDeafened(Boolean(this.rtc.isDeafened));
+    if (next === previous) return;
+    this.musicSubscriptionChannelId = next;
+    if (previous) this.api.musicUnsubscribe(previous);
+    this.music.setActiveChannel(next);
+    if (next) {
+      const result = await this.api.musicSubscribe(next).catch(() => null);
+      if (result?.ok && result.state && this.musicSubscriptionChannelId === next) this.music.handleState(result.state);
+    }
+  }
+
+  /** Render a single stable music panel from server state plus local-only audio state. */
+  renderMusicPanel(channelId, suppliedState = null) {
+    const state = suppliedState || this.music.stateFor(channelId);
+    const hasContent = Boolean(state && (state.now_playing || state.queue?.length || state.last_error || state.local_playback_error || state.local_needs_gesture));
     const listeners = this.state.voiceSessions.filter((session) => session.channel_id === channelId).length;
-    const listenerChip = listeners > 0 ? `<span class="music-panel-listeners" title="People listening in this voice room"><i class="fa-solid fa-headphones"></i>${listeners}</span>` : '';
-    if (!visible) {
+    const listenerChip = listeners > 0 ? `<span class="music-panel-listeners" title="People in this voice room"><i class="fa-solid fa-headphones"></i>${listeners}</span>` : '';
+    const playerIdentity = `mahyar-music-player:${channelId}`;
+    if (!hasContent) {
       return `
-        <div class="music-panel music-panel-empty" aria-label="Mahyar Music">
-          <div class="flex items-center gap-2.5 min-w-0">
+        <div class="music-panel music-panel-empty" data-music-panel="${this.escapeAttr(channelId)}" aria-label="Mahyar Music shared player">
+          <div class="flex items-center gap-2.5 min-w-0" data-user-identity="${this.escapeAttr(playerIdentity)}" title="Right-click for your personal music volume">
             <span class="music-panel-art music-art-idle"><i class="fa-solid fa-music"></i></span>
             <div class="min-w-0">
               <div class="text-xs font-bold text-white/85">Mahyar Music</div>
-              <div class="text-[11px] text-white/45 truncate">Type <span class="music-slash-hint">/mp play &lt;track&gt;</span> or open the shared library.</div>
+              <div class="text-[11px] text-white/45 truncate">Shared player · Type <span class="music-slash-hint">/mp play &lt;track&gt;</span> or open the library.</div>
             </div>
             ${listenerChip}
           </div>
           <div class="flex items-center gap-1.5 shrink-0">
-            <button data-action="musicOpenLibrary" class="music-panel-btn music-panel-btn-accent" title="Open the MAHYAR MUSIC LIBRARY" aria-label="Open music library"><i class="fa-solid fa-compact-disc text-xs mr-1"></i>Library</button>
+            <button data-action="musicOpenLibrary" class="music-panel-btn music-panel-btn-accent" title="Open the shared music library" aria-label="Open music library"><i class="fa-solid fa-compact-disc text-xs mr-1"></i>Library</button>
             <button data-action="musicCommandHelp" class="music-panel-btn" title="Music commands" aria-label="Music commands"><i class="fa-solid fa-circle-question text-xs"></i></button>
           </div>
         </div>
@@ -867,10 +882,11 @@ class MahyarGapApp {
     }
     const np = state.now_playing;
     const progress = np ? this.musicProgress(np) : { pct: 0, label: '' };
-    const next = state.queue[0];
+    const next = state.queue?.[0];
+    const localError = state.local_playback_error || '';
     return `
-      <div class="music-panel" aria-label="Mahyar Music player">
-        <div class="flex items-center gap-2.5 min-w-0 flex-1">
+      <div class="music-panel" data-music-panel="${this.escapeAttr(channelId)}" aria-label="Mahyar Music shared player">
+        <div class="flex items-center gap-2.5 min-w-0 flex-1" data-user-identity="${this.escapeAttr(playerIdentity)}" title="Right-click for your personal music volume">
           ${np?.artwork_url
             ? `<img class="music-panel-art" src="${this.escapeAttr(np.artwork_url)}" alt="" referrerpolicy="no-referrer" />`
             : `<span class="music-panel-art music-art-live"><i class="fa-solid fa-compact-disc ${np && !np.paused ? 'fa-spin-slow' : ''}"></i></span>`}
@@ -882,7 +898,7 @@ class MahyarGapApp {
             </div>
             ${np ? `
               <div class="text-sm font-bold text-white truncate mt-0.5" title="${this.escapeAttr(np.title)}">${this.escapeHtml(np.title)}</div>
-              <div class="text-[11px] text-white/50 truncate">${this.escapeHtml(np.artist || 'Unknown artist')} • from the server library</div>
+              <div class="text-[11px] text-white/50 truncate">${this.escapeHtml(np.artist || 'Unknown artist')} · shared from your library</div>
               <div class="music-progress-row">
                 <span class="music-progress-time">${progress.label}</span>
                 <div class="music-progress-track"><div class="music-progress-fill" style="width:${progress.pct}%"></div></div>
@@ -890,19 +906,22 @@ class MahyarGapApp {
               </div>
             ` : `
               <div class="text-sm font-bold text-white/80 truncate mt-0.5">${state.last_error ? this.escapeHtml(state.last_error) : 'Queue is ready'}</div>
-              <div class="text-[11px] text-white/45 truncate">${state.queue.length ? `${state.queue.length} track(s) waiting` : 'Add a song with /mp play'}</div>
+              <div class="text-[11px] text-white/45 truncate">${state.queue?.length || 0} track(s) waiting</div>
             `}
+            ${state.local_needs_gesture ? '<div class="text-[11px] text-amber-300 mt-1">Your browser needs permission to start shared audio.</div>' : ''}
+            ${localError ? `<div class="text-[11px] text-red-300 mt-1 truncate" title="${this.escapeAttr(localError)}">${this.escapeHtml(localError)}</div>` : ''}
           </div>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
+          ${state.local_needs_gesture ? '<button data-action="musicEnableAudio" class="music-panel-btn music-panel-btn-accent" title="Enable audio on this device"><i class="fa-solid fa-volume-high text-xs mr-1"></i>Enable Audio</button>' : ''}
           ${np ? `
             <button data-action="musicResume" class="music-panel-btn" title="${np.paused ? 'Resume' : 'Playing'}" aria-label="Resume playback" ${np.paused ? '' : 'disabled'}><i class="fa-solid fa-play text-xs"></i></button>
             <button data-action="musicPause" class="music-panel-btn" title="${np.paused ? 'Paused' : 'Pause'}" aria-label="Pause playback" ${np.paused ? 'disabled' : ''}><i class="fa-solid fa-pause text-xs"></i></button>
             <button data-action="musicSkip" class="music-panel-btn" title="Skip track" aria-label="Skip track"><i class="fa-solid fa-forward text-xs"></i></button>
           ` : ''}
           <button data-action="musicStop" class="music-panel-btn music-panel-btn-danger" title="Stop and clear queue" aria-label="Stop playback"><i class="fa-solid fa-stop text-xs"></i></button>
-          <button data-action="musicOpenQueue" class="music-panel-btn" title="Queue (${state.queue.length})" aria-label="Show queue"><i class="fa-solid fa-list-ol text-xs"></i></button>
-          <button data-action="musicOpenLibrary" class="music-panel-btn music-panel-btn-accent" title="Open the MAHYAR MUSIC LIBRARY" aria-label="Open music library"><i class="fa-solid fa-compact-disc text-xs"></i></button>
+          <button data-action="musicOpenQueue" class="music-panel-btn" title="Queue (${state.queue?.length || 0})" aria-label="Show queue"><i class="fa-solid fa-list-ol text-xs"></i></button>
+          <button data-action="musicOpenLibrary" class="music-panel-btn music-panel-btn-accent" title="Open the music library" aria-label="Open music library"><i class="fa-solid fa-compact-disc text-xs"></i></button>
         </div>
         ${next ? `<div class="music-panel-next">Next: <span class="font-semibold text-white/80">${this.escapeHtml(next.title)}</span></div>` : ''}
       </div>
@@ -913,7 +932,7 @@ class MahyarGapApp {
   musicProgress(np) {
     const duration = Number(np.duration) || 0;
     const base = Number(np.position) || 0;
-    const at = Number(np.position_ts) || Date.now();
+    const at = Number(np.client_received_at) || Number(np.position_ts) || Date.now();
     const elapsed = np.paused ? 0 : (Date.now() - at) / 1000;
     const position = Math.min(duration || Infinity, base + Math.max(0, elapsed));
     const pct = duration ? Math.max(0, Math.min(100, (position / duration) * 100)) : 0;
@@ -935,29 +954,11 @@ class MahyarGapApp {
     }, 1000);
   }
 
-  /** Bot chip for the voice participant strip. */
-  renderMusicBotChip(channelId) {
-    const state = this.music.stateFor(channelId);
-    if (!state?.bot_connected || !state.bot_identity) return '';
-    const np = state.now_playing;
-    const volume = this.rtc.getUserVolume(state.bot_identity);
-    return `
-      <div class="voice-participant-chip music-bot-chip ${np && !np.paused ? 'is-playing' : ''}"
-           data-user-identity="${this.escapeAttr(state.bot_identity)}"
-           title="Mahyar Music — right-click for music volume"
-           role="button" tabindex="0">
-        <span class="music-bot-avatar"><i class="fa-solid fa-music text-[10px]"></i></span>
-        <span class="max-w-28 truncate font-semibold">Mahyar Music</span>
-        ${np && !np.paused ? '<i class="fa-solid fa-compact-disc fa-spin-slow text-[#22D3EE] text-[10px]"></i>' : ''}
-        ${volume === 0 ? '<i class="fa-solid fa-volume-xmark text-[#FF5F6D] text-[10px]" title="Muted for you"></i>' : volume !== 100 ? `<span class="text-[9px] text-[#22D3EE]">${volume}%</span>` : ''}
-      </div>
-    `;
-  }
 
   async runMusicCommand(action, extra = {}) {
     const channelId = this.musicTargetChannelId();
     if (!channelId) {
-      this.showToast('Join or open a voice channel to use Mahyar Music.', 'error');
+      this.showToast('Join a voice channel first to use Mahyar Music.', 'error');
       return null;
     }
     const result = await this.api.musicCommand(channelId, action, extra);
@@ -965,6 +966,12 @@ class MahyarGapApp {
     if (!result?.ok && result?.error) this.showToast(result.error, 'error');
     else if (result?.message && result.message !== 'PICK_RESULT') this.showToast(result.message, result.ok ? 'success' : 'info');
     return result;
+  }
+
+  async musicEnableAudio() {
+    const enabled = await this.music.enableAudio();
+    if (enabled) this.showToast('Music audio enabled on this device.', 'success');
+    else this.showToast('Click Enable Audio again after allowing audio playback in your browser.', 'warning');
   }
 
   async musicPause() { await this.runMusicCommand('pause'); }
@@ -1167,7 +1174,7 @@ class MahyarGapApp {
 
   async openSearchPicker(query) {
     const channelId = this.musicTargetChannelId();
-    if (!channelId) return this.showToast('Join or open a voice channel to use Mahyar Music.', 'error');
+    if (!channelId) return this.showToast('Join a voice channel first to use Mahyar Music.', 'error');
     this.showToast('Searching Mahyar Music…', 'info');
     const result = await this.api.musicCommand(channelId, 'search', { query });
     if (!result?.ok) return this.showToast(result?.error || 'No playable results found.', 'error');
@@ -1339,10 +1346,39 @@ class MahyarGapApp {
       }
       const init = await this.api.musicUploadInit(serverId, file);
       entry.progress = 1;
-      await this.api.musicUploadPut(init.upload_url, file, init.content_type, (pct) => {
-        entry.progress = Math.max(1, pct);
+      // Ask the backend for a read-only Bucket CORS check. If direct browser PUT
+      // is known to be blocked, skip the failed preflight entirely and use the
+      // same-origin streaming relay. If diagnostics are unavailable, try direct
+      // upload once and fall back only for a browser-level network/CORS failure.
+      const uploadDiagnostics = await this.api.musicUploadDiagnostics().catch(() => null);
+      if (uploadDiagnostics?.storage_configured === false) {
+        throw new Error(`Railway music storage is not configured (${(uploadDiagnostics.missing_variables || []).join(', ')}).`);
+      }
+      const useRelayFirst = uploadDiagnostics?.browser_uploads_possible === false;
+      const relayUpload = async () => {
+        entry.uploadMode = 'server';
+        entry.progress = 1;
         this.updateUploadRowDom(entry);
-      });
+        await this.api.musicUploadStream(init.upload_token, file, (pct) => {
+          entry.progress = Math.max(1, pct);
+          this.updateUploadRowDom(entry);
+        });
+      };
+      if (useRelayFirst) {
+        await relayUpload();
+      } else {
+        try {
+          await this.api.musicUploadPut(init.upload_url, file, init.content_type, (pct) => {
+            entry.progress = Math.max(1, pct);
+            entry.uploadMode = 'direct';
+            this.updateUploadRowDom(entry);
+          });
+          entry.uploadMode = 'direct';
+        } catch (directError) {
+          if (directError?.code !== 'STORAGE_NETWORK_ERROR') throw directError;
+          await relayUpload();
+        }
+      }
       entry.status = 'processing';
       this.renderMusicLibraryIfOpen();
       const complete = await this.api.musicUploadComplete(init.upload_token, {});
@@ -1354,7 +1390,8 @@ class MahyarGapApp {
     } catch (error) {
       entry.status = 'error';
       entry.error = error.message || 'The upload failed.';
-      if (error?.code === 'STORAGE_NETWORK_ERROR') entry.error = await this.describeStorageFailure();
+      if (error?.code === 'STORAGE_NETWORK_ERROR') entry.error = 'The browser could not reach Railway Bucket, and the streaming fallback was not started. Retry the upload or inspect the Bucket diagnostics.';
+      if (error?.code === 'STORAGE_RELAY_NETWORK_ERROR') entry.error = 'The application upload service could not be reached. Check the Railway deployment and try again.';
       this.showToast(`Upload failed for "${file.name}": ${entry.error}`, 'error');
     }
     this.renderMusicLibraryIfOpen();
@@ -1364,24 +1401,6 @@ class MahyarGapApp {
     }, entry.status === 'error' ? 8000 : 4000);
   }
 
-  /** Turns an opaque browser network error into an actionable sentence by asking the
-   *  backend whether the bucket's CORS rules actually allow this origin to PUT. */
-  async describeStorageFailure() {
-    try {
-      const diag = await this.api.musicUploadDiagnostics();
-      if (diag?.storage_configured === false) {
-        return `Music storage is not configured on this deployment (${(diag.missing_variables || []).join(', ')}).`;
-      }
-      if (diag?.browser_uploads_possible === false) {
-        return `The bucket refused a browser upload from ${diag.request_origin} because it has no CORS rule for this origin. Add one with: node scripts/bucket_cors.js --apply ${diag.request_origin}`;
-      }
-      if (diag?.browser_uploads_possible === true) {
-        return 'The bucket CORS rules are correct, so the upload was blocked elsewhere — check the browser network tab (offline connection, proxy/VPN, or an expired upload URL).';
-      }
-    } catch (_) { /* diagnostics are best-effort only */ }
-    return 'The browser could not reach the storage bucket. The usual cause is a missing CORS rule on the bucket for this site — see the README section “Bucket CORS”.';
-  }
-
   /** Live progress bar update without a modal re-render (keeps typing focus stable). */
   updateUploadRowDom(entry) {
     const row = document.getElementById(`ml-up-${entry.id}`);
@@ -1389,7 +1408,7 @@ class MahyarGapApp {
     const fill = row.querySelector('.ml-up-fill');
     if (fill) fill.style.width = `${entry.progress}%`;
     const label = row.querySelector('.ml-up-pct');
-    if (label) label.textContent = `${entry.progress}%`;
+    if (label) label.textContent = `${entry.uploadMode === 'server' ? 'Server · ' : ''}${entry.progress}%`;
   }
 
   renderMusicLibraryIfOpen() {
@@ -1399,7 +1418,7 @@ class MahyarGapApp {
   async musicTrackPlay(trackId) {
     this.musicLibrary.confirmDeleteId = null;
     const channelId = this.musicTargetChannelId();
-    if (!channelId) return this.showToast('Join a voice channel first — the bot plays music there.', 'error');
+    if (!channelId) return this.showToast('Join a voice channel first to use shared music.', 'error');
     const result = await this.runMusicCommand('play', { track_id: trackId });
     if (result?.ok) this.showToast(result.message || 'Playing from the shared library.', 'success');
   }
@@ -1509,7 +1528,7 @@ class MahyarGapApp {
 
   async musicPlaylistPlay(playlistId) {
     const channelId = this.musicTargetChannelId();
-    if (!channelId) return this.showToast('Join a voice channel first — the bot plays music there.', 'error');
+    if (!channelId) return this.showToast('Join a voice channel first to use shared music.', 'error');
     const result = await this.api.musicPlayPlaylist(channelId, playlistId);
     if (result?.state) this.music.handleState(result.state);
     if (result?.ok) {
@@ -2011,25 +2030,11 @@ class MahyarGapApp {
         `;
 
         // Render connected voice members right under voice channel
-        if (ch.type === 'voice' && voiceUsers.length > 0) {
+        const channelMusicState = ch.type === 'voice' ? this.music.stateFor(ch.id) : null;
+        const showMusicPlayerRow = Boolean(channelMusicState?.now_playing || channelMusicState?.queue?.length);
+        if (ch.type === 'voice' && (voiceUsers.length > 0 || showMusicPlayerRow)) {
           html += `<div class="pl-7 pr-3 py-1 space-y-1">`;
           voiceUsers.forEach((vs) => {
-            if (this.isMusicBotIdentity(vs.user_id)) {
-              const musicState = this.music.stateFor(ch.id);
-              const botLive = musicState?.bot_connected;
-              if (!botLive) return; // stale LiveKit participant, state already cleaned up
-              const botPlaying = musicState?.now_playing && !musicState.now_playing.paused;
-              html += `
-                <div class="voice-member-row ${botPlaying ? 'is-playing-music' : ''}" data-action="selectChannel" data-action-args="${this.encodeActionArgs([ch.id])}" data-user-identity="${this.escapeAttr(musicState.bot_identity)}" title="Mahyar Music — right-click for music volume">
-                  <div class="flex items-center gap-2 min-w-0">
-                    <span class="music-bot-avatar"><i class="fa-solid fa-music text-[9px]"></i></span>
-                    <span class="text-xs font-semibold text-white/85 truncate">Mahyar Music</span>
-                    ${botPlaying ? '<i class="fa-solid fa-compact-disc fa-spin-slow text-[#22D3EE] text-[9px]"></i>' : ''}
-                  </div>
-                </div>
-              `;
-              return;
-            }
             const u = this.getUserById(vs.user_id);
             const isLocal = vs.user_id === this.state.currentUserId && this.rtc.activeChannelId === ch.id;
             const speaking = isLocal ? this.rtc.isSpeaking : vs.speaking;
@@ -2051,6 +2056,20 @@ class MahyarGapApp {
               </div>
             `;
           });
+          if (showMusicPlayerRow) {
+            const musicPlaying = Boolean(channelMusicState?.now_playing && !channelMusicState.now_playing.paused);
+            const localMuted = this.music.isMuted();
+            html += `
+              <div class="voice-member-row music-player-member ${musicPlaying ? 'is-playing-music' : ''}" data-action="selectChannel" data-action-args="${this.encodeActionArgs([ch.id])}" data-user-identity="mahyar-music-player:${this.escapeAttr(ch.id)}" title="Mahyar Music shared player — right-click for your personal volume">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="music-bot-avatar"><i class="fa-solid fa-music text-[9px]"></i></span>
+                  <span class="text-xs font-semibold text-white/85 truncate">Mahyar Music</span>
+                  ${musicPlaying ? '<i class="fa-solid fa-compact-disc fa-spin-slow text-[#22D3EE] text-[9px]"></i>' : ''}
+                </div>
+                <span class="text-[10px] text-muted-token">${localMuted ? '<i class="fa-solid fa-volume-xmark"></i>' : 'PLAYER'}</span>
+              </div>
+            `;
+          }
           html += `</div>`;
         }
 
@@ -2341,7 +2360,7 @@ class MahyarGapApp {
     const inCall = this.rtc.mode === 'voice' && this.rtc.activeChannelId === channel.id && Boolean(this.rtc.room);
     const remoteScreens = Array.from(this.rtc.remoteVideoTracks.keys()).filter((key) => key.startsWith('screen:'));
     if ((inCall && this.rtc.isScreenSharing) || remoteScreens.length) return 'screen';
-    const participants = this.getVoiceParticipants(channel.id).filter((p) => !this.isMusicBotIdentity(p.user_id));
+    const participants = this.getVoiceParticipants(channel.id);
     const anyCamera = participants.some((p) => {
       const isLocal = p.user_id === me.id && inCall;
       return isLocal ? this.rtc.isVideoEnabled : this.rtc.remoteVideoTracks.has(`camera:${p.user_id}`);
@@ -2352,7 +2371,7 @@ class MahyarGapApp {
   /** Cheap fingerprint of everything the voice region actually renders. */
   voiceRegionSignature(channel) {
     const me = this.getCurrentUser();
-    const participants = this.getVoiceParticipants(channel.id).filter((p) => !this.isMusicBotIdentity(p.user_id));
+    const participants = this.getVoiceParticipants(channel.id);
     const people = participants.map((p) => {
       const isLocal = p.user_id === me.id && this.rtc.mode === 'voice' && this.rtc.activeChannelId === channel.id;
       const camera = isLocal ? this.rtc.isVideoEnabled : this.rtc.remoteVideoTracks.has(`camera:${p.user_id}`);
@@ -2360,7 +2379,7 @@ class MahyarGapApp {
       return [p.user_id, isLocal ? this.rtc.isMuted : p.muted, isLocal ? this.rtc.isDeafened : p.deafened, camera, volume].join('.');
     }).join(',');
     const music = this.music.stateFor(channel.id);
-    const musicKey = music ? [music.bot_connected ? 1 : 0, music.now_playing?.id || '', music.now_playing?.paused ? 1 : 0, music.queue.length, music.last_error || ''].join('.') : '';
+    const musicKey = music ? [music.player_mode || 'synchronized-browser', music.now_playing?.playback_id || '', music.now_playing?.paused ? 1 : 0, music.queue.length, music.last_error || ''].join('.') : '';
     return [
       channel.id, channel.name, this.rtc.connectionStatus, this.rtc.mode, this.rtc.activeChannelId || '',
       this.rtc.isVideoEnabled ? 1 : 0, this.rtc.isScreenSharing ? 1 : 0, this.rtc.isMuted ? 1 : 0, this.rtc.isDeafened ? 1 : 0,
@@ -2426,7 +2445,7 @@ class MahyarGapApp {
     const me = this.getCurrentUser();
     const inCall = this.rtc.mode === 'voice' && this.rtc.activeChannelId === channel.id && Boolean(this.rtc.room);
     const connected = inCall && this.rtc.connectionStatus === 'connected';
-    const participants = this.getVoiceParticipants(channel.id).filter((p) => !this.isMusicBotIdentity(p.user_id));
+    const participants = this.getVoiceParticipants(channel.id);
     const mode = this.voiceStageMode(channel);
     const remoteScreens = Array.from(this.rtc.remoteVideoTracks.keys()).filter((key) => key.startsWith('screen:'));
     this.ensureMusicProgressTicker();
@@ -2583,7 +2602,7 @@ class MahyarGapApp {
     const ch = this.state.channels.find((c) => c.id === channelId);
     if (!ch) return '';
     const connected = this.rtc.connectionStatus === 'connected';
-    const participants = this.getVoiceParticipants(channelId).filter((p) => !this.isMusicBotIdentity(p.user_id));
+    const participants = this.getVoiceParticipants(channelId);
     return `
       <div class="voice-dock">
         <button class="voice-dock-main" data-action="selectChannel" data-action-args="${this.encodeActionArgs([channelId])}" title="Open ${this.escapeAttr(ch.name)}">
@@ -4380,7 +4399,14 @@ class MahyarGapApp {
   }
 
   onWebRTCStateChange(_rtcState, eventType) {
-    this.renderAll();
+    // Voice/media events must never rebuild the message stage or composer.
+    void this.syncMusicSubscription();
+    this.renderVoiceConnectionBar();
+    this.refreshVoiceRegion(false);
+    if (['participant-connected', 'participant-disconnected', 'connection-state-changed', 'local-track-published', 'local-track-unpublished', 'camera-error'].includes(eventType)) {
+      this.renderLeftSidebar();
+      this.renderRightSidebar();
+    }
     this.attachLiveVideoStreams();
     if (eventType === 'microphone-unavailable') this.showToast('Microphone access failed; you remain connected as a listener.', 'error');
     if (eventType === 'local-track-unpublished' && this.rtc.activeChannelId) this.syncVoiceSession().catch((error) => console.warn('Voice state sync failed:', error));
@@ -5354,6 +5380,8 @@ class MahyarGapApp {
 
   async logout() {
     const channelId = this.rtc.activeChannelId;
+    this.music?.destroy?.();
+    this.musicSubscriptionChannelId = null;
     const voiceSession = this.state.voiceSessions.find((session) => session.user_id === this.state.currentUserId && session.channel_id === channelId);
     if (this.rtc.room || channelId) {
       try { await this.rtc.leaveVoiceChannel(); } catch (_) {}
@@ -5656,21 +5684,22 @@ class MahyarGapApp {
     const menu = this.state.contextMenu;
     if (!menu) { root.innerHTML = ''; return; }
 
-    // Mahyar Music bot menu: identity-scoped music volume only (never mutes the mic,
-    // never touches other users' volumes).
-    if (this.isMusicBotIdentity(menu.identity)) {
-      const musicState = this.music.stateFor(menu.identity.split(':')[1] || '') || [...this.music.states.values()].find((s) => s.bot_identity === menu.identity);
-      const volume = this.rtc.getUserVolume(menu.identity);
+    // Shared browser music player menu: controls only this browser's audio output.
+    if (this.isMusicPlayerIdentity(menu.identity)) {
+      const channelId = menu.identity.slice(window.MahyarMusic.PLAYER_CONTEXT_PREFIX.length);
+      const musicState = this.music.stateFor(channelId);
+      const volume = this.music.getVolume();
+      const muted = this.music.isMuted();
       const left = Math.max(8, Math.min(menu.x, window.innerWidth - 274));
-      const top = Math.max(8, Math.min(menu.y, window.innerHeight - 300));
+      const top = Math.max(8, Math.min(menu.y, window.innerHeight - 280));
       const np = musicState?.now_playing;
       root.innerHTML = `
-        <div class="mg-context-menu" role="dialog" aria-label="Mahyar Music volume" style="left:${left}px; top:${top}px">
+        <div class="mg-context-menu" role="dialog" aria-label="Mahyar Music personal volume" style="left:${left}px; top:${top}px">
           <div class="mg-menu-header flex items-center gap-2.5">
             <span class="music-bot-avatar" style="width:36px;height:36px;font-size:13px"><i class="fa-solid fa-music"></i></span>
             <div class="min-w-0">
               <div class="text-xs font-bold text-primary-token truncate">Mahyar Music</div>
-              <div class="text-[10px] text-muted-token truncate">${np ? this.escapeHtml(np.title) : 'Music bot'}</div>
+              <div class="text-[10px] text-muted-token truncate">${np ? this.escapeHtml(np.title) : 'Shared music player'}</div>
             </div>
           </div>
           <div class="px-2 py-1.5">
@@ -5678,11 +5707,11 @@ class MahyarGapApp {
               <span>Music volume (only you)</span>
               <span id="user-volume-label" class="text-primary-token font-semibold">${volume}%</span>
             </div>
-            <input type="range" min="0" max="200" step="5" value="${volume}" class="mg-volume-slider" style="--volume-pct:${volume / 2}%" aria-label="Music volume" data-action="setParticipantVolume" data-action-event="input" data-action-args="${this.encodeActionArgs([menu.identity, { __pulsecordEventValue: true }])}" />
-            <div class="flex justify-between text-[9px] text-muted-token mt-1"><span>0%</span><span>100%</span><span>200%</span></div>
+            <input type="range" min="0" max="100" step="1" value="${volume}" class="mg-volume-slider" style="--volume-pct:${volume}%" aria-label="Personal music volume" data-action="setParticipantVolume" data-action-event="input" data-action-args="${this.encodeActionArgs([menu.identity, { __pulsecordEventValue: true }])}" />
+            <div class="flex justify-between text-[9px] text-muted-token mt-1"><span>0%</span><span>50%</span><span>100%</span></div>
           </div>
           <button class="mg-menu-item" data-action="toggleUserLocalMute" data-action-args="${this.encodeActionArgs([menu.identity])}">
-            <i class="fa-solid ${volume === 0 ? 'fa-volume-high' : 'fa-volume-xmark'} w-4 text-center"></i>${volume === 0 ? 'Unmute music for me' : 'Mute music for me'}
+            <i class="fa-solid ${muted ? 'fa-volume-high' : 'fa-volume-xmark'} w-4 text-center"></i>${muted ? 'Unmute music for me' : 'Mute music for me'}
           </button>
           <div class="mg-menu-sep"></div>
           <button class="mg-menu-item" data-action="musicOpenQueue"><i class="fa-solid fa-list-ol w-4 text-center"></i>Open music queue</button>
@@ -5731,25 +5760,28 @@ class MahyarGapApp {
   }
 
   setParticipantVolume(identity, value) {
-    const volume = this.rtc.setUserVolume(identity, value);
+    const isMusicPlayer = this.isMusicPlayerIdentity(identity);
+    const volume = isMusicPlayer ? this.music.setVolume(value) : this.rtc.setUserVolume(identity, value);
     const label = document.getElementById('user-volume-label');
     if (label) label.textContent = `${volume}%`;
     const slider = document.querySelector('.mg-volume-slider');
-    if (slider) slider.style.setProperty('--volume-pct', `${volume / 2}%`);
-    this.renderLeftSidebar();
-    this.renderVoiceConnectionBar();
+    if (slider) slider.style.setProperty('--volume-pct', `${isMusicPlayer ? volume : volume / 2}%`);
+    if (!isMusicPlayer) {
+      this.renderLeftSidebar();
+      this.renderVoiceConnectionBar();
+    }
     return volume;
   }
 
   toggleUserLocalMute(identity) {
-    const volume = this.rtc.toggleUserMute(identity);
-    if (this.isMusicBotIdentity(identity)) {
-      this.renderLeftSidebar();
-      this.showToast(volume === 0 ? 'Mahyar Music muted for you' : 'Mahyar Music audible again', 'info');
+    if (this.isMusicPlayerIdentity(identity)) {
+      this.music.toggleMute();
+      this.showToast(this.music.isMuted() ? 'Mahyar Music muted for you' : 'Mahyar Music audible again', 'info');
       this.state.contextMenu = { ...this.state.contextMenu, identity };
       this.renderContextMenu();
       return;
     }
+    const volume = this.rtc.toggleUserMute(identity);
     const user = this.getUserById(identity);
     this.renderLeftSidebar();
     this.showToast(volume === 0 ? `${user.display_name || user.username} muted for you` : `${user.display_name || user.username} audible again`, 'info');

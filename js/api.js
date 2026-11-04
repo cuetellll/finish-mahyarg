@@ -7,6 +7,7 @@ class MahyarAPI {
     this.listeners = new Set();
     this.socket = null;
     this.joinedChannelId = null;
+    this.musicSubscribedChannelId = null;
     if (this.bus) this.bus.onmessage = (event) => this.listeners.forEach((cb) => { try { cb(event.data); } catch (err) { console.error('Realtime listener error:', err); } });
   }
 
@@ -102,6 +103,7 @@ class MahyarAPI {
     this.clearToken();
     if (this.socket) { this.socket.disconnect(); this.socket = null; }
     this.joinedChannelId = null;
+    this.musicSubscribedChannelId = null;
   }
 
   connectRealtime() {
@@ -109,6 +111,7 @@ class MahyarAPI {
     this.socket = window.io({ auth: { token: this.token() }, reconnection: true, reconnectionAttempts: Infinity, reconnectionDelayMax: 10000 });
     this.socket.on('connect', () => {
       if (this.joinedChannelId) this.socket.emit('channel:join', this.joinedChannelId);
+      if (this.musicSubscribedChannelId) this.emitMusicSubscribe(this.musicSubscribedChannelId);
       this.emitEvent('socket_connected', {});
     });
     this.socket.on('connect_error', (err) => {
@@ -136,6 +139,38 @@ class MahyarAPI {
     return this.socket;
   }
 
+  /** Subscribe independently to a voice room's music timeline (not the chat room). */
+  emitMusicSubscribe(channelId) {
+    if (!channelId || !this.socket?.connected) return;
+    this.socket.emit('music:subscribe', channelId, (result) => {
+      if (result?.ok && result.state) this.emitEvent('music_state', result.state);
+    });
+  }
+
+  musicSubscribe(channelId) {
+    const next = String(channelId || '');
+    if (!next) return Promise.resolve({ ok: false });
+    if (this.musicSubscribedChannelId && this.musicSubscribedChannelId !== next && this.socket?.connected) {
+      this.socket.emit('music:unsubscribe', this.musicSubscribedChannelId);
+    }
+    this.musicSubscribedChannelId = next;
+    if (!this.socket?.connected) return Promise.resolve({ ok: false, pending: true });
+    return new Promise((resolve) => {
+      this.socket.emit('music:subscribe', next, (result) => {
+        // The app consumes the returned snapshot exactly once. The reconnect
+        // helper above emits it through the event bus because no caller awaits it.
+        resolve(result || { ok: false });
+      });
+    });
+  }
+
+  musicUnsubscribe(channelId) {
+    const id = String(channelId || '');
+    if (!id) return;
+    if (!channelId || this.musicSubscribedChannelId === id) this.musicSubscribedChannelId = null;
+    if (this.socket?.connected) this.socket.emit('music:unsubscribe', id);
+  }
+
   /** Sends a Mahyar Music command over the realtime socket (ack-based, 10 s timeout). */
   musicCommand(channelId, action, extra = {}) {
     return new Promise((resolve) => {
@@ -159,6 +194,15 @@ class MahyarAPI {
 
   musicLibraryStatus(serverId) {
     return this.request(`/api/music/library/status?server_id=${encodeURIComponent(serverId || '')}`);
+  }
+
+  musicState(channelId) {
+    return this.request(`/api/music/state?channel_id=${encodeURIComponent(channelId || '')}`);
+  }
+
+  musicPlaybackUrl(channelId, trackId) {
+    const params = new URLSearchParams({ channel_id: channelId || '', track_id: trackId || '' });
+    return this.request(`/api/music/playback-url?${params.toString()}`);
   }
 
   musicLibrary(serverId, { q = '', limit = 60, offset = 0 } = {}) {
@@ -205,7 +249,34 @@ class MahyarAPI {
     });
   }
 
-  /** Server-side verdict on why a browser upload fails (bucket CORS for this origin). */
+  /** Same-origin streaming fallback for deployments whose Bucket does not allow browser CORS. */
+  musicUploadStream(uploadToken, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/music/upload/stream');
+      const token = this.token();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.setRequestHeader('X-Upload-Token', String(uploadToken || ''));
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && typeof onProgress === 'function') onProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(body);
+        const error = new Error(body.error || `Server-side upload failed (HTTP ${xhr.status}).`);
+        error.status = xhr.status;
+        error.code = body.code || 'STORAGE_RELAY_FAILED';
+        reject(error);
+      };
+      xhr.onerror = () => reject(Object.assign(new Error('The application server could not receive the music upload.'), { code: 'STORAGE_RELAY_NETWORK_ERROR' }));
+      xhr.onabort = () => reject(Object.assign(new Error('Music upload was cancelled.'), { code: 'UPLOAD_ABORTED' }));
+      xhr.send(file);
+    });
+  }
+
+  /** Read-only bucket CORS diagnostics; the stream fallback does not depend on it. */
   musicUploadDiagnostics() {
     return this.request('/api/music/upload/diagnostics');
   }

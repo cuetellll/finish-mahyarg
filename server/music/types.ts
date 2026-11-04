@@ -19,8 +19,6 @@ export interface MusicTrack {
   trackId: string;
   title: string;
   artist: string;
-  /** Short-lived presigned URL resolved at play time (server-side only; never sent to clients). */
-  streamUrl?: string;
   /** Artwork route, safe to show in the UI (authenticated /api/music/... path). */
   artworkUrl?: string;
   /** Duration in seconds; 0 when unknown. */
@@ -46,16 +44,21 @@ export interface NowPlaying {
   startedAt: number;
   /** Seconds already elapsed before startedAt (after a resume). */
   offsetSeconds: number;
+  /** Unique playback generation; rejects stale ended events from previous tracks. */
+  playbackId: string;
 }
 
 export interface PublicMusicState {
   channel_id: string;
   server_id: string;
-  /** True when the bot participant is connected to the LiveKit room. */
+  /** Backwards-compatible fields; synchronized browser playback has no LiveKit bot. */
   bot_connected: boolean;
   bot_identity: string | null;
+  player_mode?: 'synchronized-browser';
   now_playing: null | {
     id: string;
+    track_id: string;
+    playback_id: string;
     title: string;
     artist: string;
     origin: string;
@@ -65,6 +68,7 @@ export interface PublicMusicState {
     /** Server-computed playback position at `position_ts`, seconds. */
     position: number;
     position_ts: number;
+    started_at: number;
     paused: boolean;
   };
   queue: Array<{
@@ -94,8 +98,6 @@ export interface MusicLibraryResolver {
   searchTracks(serverId: string, query: string, limit: number): Promise<MusicTrack[]>;
   /** Loads one library track as playable (or returns null). */
   getPlayableTrack(serverId: string, trackId: string): Promise<MusicTrack | null>;
-  /** Resolves a fresh short-lived stream URL for a library track. */
-  streamUrl(track: MusicTrack): Promise<string | null>;
   /** Ordered tracks of a playlist (empty when the playlist is not on this server). */
   playlistTracks(serverId: string, playlistId: string): Promise<MusicTrack[]>;
   /** Marks a track as played (play count / last played). Fire and forget. */

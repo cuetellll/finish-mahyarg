@@ -26,12 +26,12 @@
     </ul>
     <h2>Data we do not store</h2>
     <ul>
-      <li>Voice and music are never recorded; media flows directly through LiveKit.</li>
+      <li>Mahyar Gap does not record voice or video calls; human voice/video uses LiveKit. Music files uploaded by members remain in the private Railway Storage Bucket while listed in the library, and each listener’s browser retrieves the file directly during synchronized playback.</li>
       <li>Music queue and playback state live in server memory only and are never written to the database.</li>
       <li>There are no ads, analytics trackers or advertising cookies.</li>
     </ul>
     <h2>Third-party services</h2>
-    <p>Media transport runs through LiveKit. If a music source is enabled (e.g. SoundCloud through its official API), metadata requests are made server-side and no personal data is shared with that service.</p>
+    <p>LiveKit is used for human voice and video. Railway Storage Buckets store private music-library files. Socket.IO synchronizes the queue and playback timeline; each authorized listener’s browser streams the audio file directly from private storage.</p>
     <h2>Your rights</h2>
     <p>You can delete your account at any time, or ask your server admin to remove your content. For anything else, contact your server owner.</p>
   </main>

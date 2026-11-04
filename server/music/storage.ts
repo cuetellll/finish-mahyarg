@@ -13,8 +13,9 @@
  *   AWS_S3_URL_STYLE       "virtual-hosted" (default) or "path"
  *
  * Nothing here ever hands out permanent public URLs or credentials:
- *  - uploads  : short-lived presigned PUT performed directly by the browser;
- *  - playback : short-lived presigned GET handed to the bot worker only;
+ *  - uploads  : short-lived presigned PUT performed directly by the browser,
+ *                with a same-origin streaming fallback when Bucket CORS is absent;
+ *  - playback : short-lived presigned GET handed to an authenticated browser audio element;
  *  - artwork  : streamed through an authenticated Express route.
  *
  * When the variables are missing every helper reports "not configured" so
@@ -77,13 +78,17 @@ let cachedClient: { client: S3Client; key: string } | null = null;
 async function client(): Promise<S3Client> {
   const config = storageConfig();
   if (!config.ready) throw new Error('Railway Bucket storage is not configured.');
-  const cacheKey = [config.endpoint, config.region, config.bucket, config.accessKeyId, String(config.forcePathStyle)].join('|');
+  const cacheKey = [config.endpoint, config.region, config.bucket, config.accessKeyId, config.secretAccessKey, String(config.forcePathStyle)].join('|');
   if (cachedClient && cachedClient.key === cacheKey) return cachedClient.client;
   const { S3Client } = await import('@aws-sdk/client-s3');
   const s3 = new S3Client({
     region: config.region,
     endpoint: config.endpoint,
     forcePathStyle: config.forcePathStyle,
+    // Do not add optional checksum headers to presigned browser PUTs. Railway
+    // accepts normal S3 signed uploads; the server validates the stored object
+    // after upload (size, signature and ffprobe) before creating the DB record.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
     credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }
   });
   cachedClient = { client: s3, key: cacheKey };
@@ -105,7 +110,7 @@ export async function presignUpload(key: string, contentType: string, _maxBytes:
   return getSignedUrl(s3, new PutObjectCommand({ Bucket: config.bucket, Key: key, ContentType: contentType }), { expiresIn: 900 });
 }
 
-/** Presigned GET for the music worker only (default 2 h to outlive long tracks). */
+/** Presigned GET for an authorized browser audio element. */
 export async function presignDownload(key: string, expiresSeconds = 7200): Promise<string> {
   const { GetObjectCommand } = await import('@aws-sdk/client-s3');
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
@@ -194,8 +199,8 @@ export async function putObjectStream(
 
 /**
  * Downloads an object to a temp file for server-side verification
- * (signature check + ffprobe). The file is streamed to disk — the audio
- * bytes never sit in a Node Buffer, and the caller deletes it afterwards.
+ * (signature check + ffprobe metadata validation). This is upload-time
+ * validation only; normal playback is performed by browser audio elements.
  * Returns the temp path; the caller owns cleanup.
  */
 export async function downloadToTempFile(key: string, maxBytes: number): Promise<string> {

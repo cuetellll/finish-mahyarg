@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Mahyar Gap — Your Friends. Your Space. Your Music.</title>
-  <meta name="description" content="Mahyar Gap is a private space for a small group of friends: real-time chat, LiveKit voice rooms, video, screen sharing and a real Mahyar Music bot." />
+  <meta name="description" content="Mahyar Gap is a private space for a small group of friends: real-time chat, LiveKit voice rooms, video, screen sharing and a synchronized Mahyar Music playback." />
   <meta name="theme-color" content="#07070C" />
   <link rel="icon" href="/favicon.ico" sizes="any" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -82,7 +82,7 @@
         <div class="hero-meta">
           <span><i class="fa-solid fa-bolt"></i> Real-time messages</span>
           <span><i class="fa-solid fa-headphones"></i> LiveKit voice rooms</span>
-          <span class="meta-music"><i class="fa-solid fa-music"></i> A real music bot</span>
+          <span class="meta-music"><i class="fa-solid fa-music"></i> Shared synchronized music</span>
           <span><i class="fa-solid fa-feather"></i> Light on Railway</span>
         </div>
       </div>
@@ -100,7 +100,6 @@
           <div class="voice-members">
             <span><i class="fa-solid fa-user"></i> Mahyar</span>
             <span><i class="fa-solid fa-user"></i> Ali</span>
-            <span class="bot"><i class="fa-solid fa-music"></i> Mahyar Music</span>
           </div>
           <div class="row voice-row"><i class="fa-solid fa-volume-high"></i> Game Room</div>
         </div>
@@ -259,8 +258,8 @@
     <div class="container">
       <div class="section-head">
         <div class="kicker">Mahyar Music</div>
-        <h2>A real music bot in your room</h2>
-        <p>It joins the voice room as an actual participant and plays a track for everyone. Each listener keeps their own volume.</p>
+        <h2>Shared synchronized music in your room</h2>
+        <p>Everyone hears the same track at nearly the same time in their own browser. Playback controls and the queue are shared, while every listener controls their own volume.</p>
       </div>
 
       <div class="music-spot">
@@ -268,7 +267,7 @@
           <h3><span class="bot-dot"><i class="fa-solid fa-music"></i></span> Mahyar Music</h3>
           <p>Your shared library is the only source: upload your own audio into private storage, search it with <b>/mp play</b>, and play it for the room.</p>
           <ul>
-            <li><i class="fa-solid fa-check"></i> A bot participant named <b>Mahyar Music</b></li>
+            <li><i class="fa-solid fa-check"></i> A shared music player panel inside the Voice experience</li>
             <li><i class="fa-solid fa-check"></i> A shared library with direct audio uploads</li>
             <li><i class="fa-solid fa-check"></i> Shared queue, pause/resume, skip and stop</li>
             <li><i class="fa-solid fa-check"></i> Independent volume and mute for every listener</li>
@@ -298,8 +297,8 @@
           <div class="faq-body">Small private groups — a handful of friends who want their own space that is light, fast and free of ads.</div>
         </details>
         <details class="faq-item">
-          <summary>How does the music bot work? <i class="fa-solid fa-plus"></i></summary>
-          <div class="faq-body">“Mahyar Music” joins the LiveKit voice room as a real participant and publishes the same audio track to everyone. Each listener adjusts their own volume or mutes the music locally.</div>
+          <summary>How does synchronized music work? <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">Each browser plays the same private audio file directly from the Railway Bucket, while Socket.IO synchronizes the queue and playback timeline. Human voice still uses LiveKit. Every listener controls their own volume and mute; a browser may require one Enable Audio click to allow playback.</div>
         </details>
         <details class="faq-item">
           <summary>Where does the music come from? <i class="fa-solid fa-plus"></i></summary>

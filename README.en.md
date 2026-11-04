@@ -1,404 +1,225 @@
-# Mahyar Gap
+# 🌌 Mahyar Gap
 
-[🇮🇷 فارسی](README.md) | 🇬🇧 **English**
+[🇮🇷 فارسی](README.md) · 🇬🇧 **English**
 
-> **Your Friends. Your Space. Your Music.**
+> **Your friends, your space, your shared music.**
 
-Mahyar Gap is a light, private communication space for a small group of friends: text channels, direct messages, real LiveKit voice rooms, video calls, screen sharing, and a genuine music bot called **Mahyar Music** that plays tracks from the server's shared library.
+Mahyar Gap is a private communication space for small groups: real-time messaging, LiveKit voice and video, screen sharing, and synchronized music playback for everyone in a voice room.
 
-It is built for roughly **five people** running on the **Railway Free** plan. The only object-storage provider in this project is a **Railway Storage Bucket**.
+> **Music architecture:** Music is played by one HTML Audio element in each member's browser. Socket.IO synchronizes the queue and playback timeline. Music is not published as a LiveKit audio participant. Human voice and video continue to use LiveKit.
 
 ---
 
-## ✨ Features
+## ✨ Core Features
 
 | Feature | Description |
 | --- | --- |
-| 💬 **Real-time messaging** | Text channels, direct and group messages, replies, reactions, pins, threads and search over Socket.IO |
-| 🎙️ **Real voice rooms** | Live audio on LiveKit with speaking indicators, microphone, deafen and connection quality |
-| 🎥 **Video & screen sharing** | Camera and screen publishing with a dedicated screen-share layout and fullscreen |
-| 🎵 **Mahyar Music** | A real LiveKit bot participant named `Mahyar Music`, with a shared queue and per-listener volume |
-| 🗂️ **Shared music library** | Direct uploads to the bucket, metadata extraction, search and playlists |
-| 🔐 **Secure accounts** | bcrypt, JWT access tokens, server-side RBAC and role management |
-| 👥 **Private space** | Servers, private channels, invite links, kick and ban |
-| 🌐 **Bilingual** | Persian (default) and English landing pages with complete RTL/LTR layouts |
-| 🪶 **Lightweight** | No Redis, no microservices, no extra paid services |
+| 💬 Messaging | Text channels, DMs, replies, reactions, pins, and typing indicators |
+| 🎙️ Voice | LiveKit voice rooms, microphone controls, and deafen |
+| 🎥 Video & Screen Share | Responsive camera and screen-sharing layouts |
+| 🎵 Mahyar Music | Synchronized playback of shared-library files in each voice member's browser |
+| 🗂️ Shared Music Library | Upload authorized audio, search, shared queue, and playlists |
+| 🔊 Personal Audio Controls | Per-device music volume and mute |
+| 🌐 Bilingual | Persian (`/fa`) and English (`/en`) public pages |
+| 🪶 Lightweight | No music worker, no server-side PCM playback pipeline, no additional Redis or microservices |
 
----
+## 🧭 How Shared Music Works
 
-## 🖼️ Screenshots
+1. Members join a Voice Channel.
+2. An authorized audio file is uploaded to that server's Music Library.
+3. A member types `/mp play Believer` in the chat.
+4. The server synchronizes the queue and playback timeline through Socket.IO.
+5. Each member's browser plays the same private file directly from the Railway Bucket using a short-lived signed URL.
+6. Play, Pause, Resume, Skip, and Stop are shared. Volume and Mute are local to each listener.
 
-Capture these from your own running deployment and place them under `docs/screenshots/`:
+**Browser note:** Each member may need to click **Enable Audio** once because browsers can block autoplay until a user gesture.
 
-| File | What it shows |
-| --- | --- |
-| `docs/screenshots/landing-fa.png` | Persian landing page: ambient background, floating icons, app preview |
-| `docs/screenshots/voice-room.png` | Compact voice room with participant tiles and the control dock |
-| `docs/screenshots/music-library.png` | Shared music library and the player panel |
+## ⌨️ Music Commands
 
-> This repository ships no mocked-up imagery; screenshots must come from the real build.
+```text
+/mp play <track name>
+/mp queue
+/mp pause
+/mp resume
+/mp skip
+/mp stop
+/mp nowplaying
+```
 
----
+Volume and Mute are not slash commands. Right-click the **Mahyar Music** player row/panel to adjust your own output.
 
-## 🧱 Technology stack
+## 🏗️ Architecture Overview
+
+```text
+Browser A ── signed media URL ──┐
+Browser B ── signed media URL ──┼── Railway Storage Bucket (private audio)
+Browser C ── signed media URL ──┘
+
+Mahyar Gap / Express ── PostgreSQL (users, library metadata, playlists)
+          │
+          └── Socket.IO (shared queue + playback timeline)
+
+Human Voice / Video ── LiveKit
+Music Playback ─────── HTMLAudioElement in each browser
+```
+
+- Audio files are not stored in PostgreSQL; only metadata and object keys are.
+- Normally, each browser reads audio directly from the Bucket.
+- If Bucket CORS blocks browser PUT, the app automatically falls back to a same-origin streaming upload endpoint. This uses Railway application-service egress.
+- Queue and playback state are currently kept in server memory. A server restart clears the active queue and playback session.
+
+## 🧰 Technology Stack
 
 | Layer | Technology |
 | --- | --- |
-| Runtime | Node.js 22 + TypeScript |
-| Web server | Express 4 |
-| Realtime | Socket.IO 4 |
-| Live audio | LiveKit (`livekit-server-sdk` + `@livekit/rtc-node`) |
-| Database | PostgreSQL + Prisma 5 |
-| Storage | **Railway Storage Bucket** (S3-compatible) |
-| Auth | JWT + bcrypt |
-| Frontend | Plain HTML + JavaScript, locally built Tailwind, Font Awesome |
-| Audio processing | FFmpeg (installed in the Dockerfile) |
+| Runtime | Node.js 22.22+ |
+| Backend | Express + TypeScript |
+| Realtime | Socket.IO |
+| Voice / Video | LiveKit (`livekit-server-sdk`, `livekit-client`) |
+| Database | PostgreSQL + Prisma |
+| Object Storage | Railway Storage Bucket (S3-compatible) |
+| Audio validation | FFmpeg / FFprobe for upload validation and artwork only, not playback |
+| Frontend | HTML, JavaScript, CSS, Tailwind build |
 
----
+## ✅ Prerequisites
 
-## 🏗️ Architecture
+- Node.js 22.22 or newer
+- PostgreSQL
+- A LiveKit project for human voice/video
+- A Railway project and private Railway Storage Bucket (suggested display name: `mahyar-music`)
+- FFmpeg and FFprobe for validating uploaded audio (installed in the Docker image)
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          User browser                            │
-│   Landing (/fa, /en)   •   App (/app)   •   Music library        │
-└───────────┬──────────────────────────┬───────────────────────────┘
-            │ HTTPS / WebSocket        │ presigned PUT (audio)
-            ▼                          ▼
-┌───────────────────────────┐   ┌──────────────────────────────────┐
-│  Express + Socket.IO      │   │  Railway Storage Bucket          │
-│  • REST API               │   │  name: mahyar-music (private)    │
-│  • auth + RBAC            │   │  • shared music                  │
-│  • LiveKit token issuing  │   │  • file attachments              │
-│  • presigned URL issuing  │   └──────────────┬───────────────────┘
-└───────────┬───────────────┘                  │ presigned GET
-            │ Prisma                           │
-            ▼                                  ▼
-    ┌───────────────┐              ┌────────────────────────┐
-    │  PostgreSQL   │              │  Music Worker          │
-    │  (Railway)    │              │  node worker-main.js   │
-    └───────────────┘              │  FFmpeg → PCM          │
-                                   └───────────┬────────────┘
-                                               │ audio frames
-                                               ▼
-                                   ┌────────────────────────┐
-                                   │   LiveKit Room         │
-                                   │   Mahyar Music (bot)   │
-                                   └────────────────────────┘
-```
-
-**Design notes**
-
-- Audio goes from the browser **straight** to the bucket (`presigned PUT`); the file body never travels through Express memory.
-- Each active voice room has at most **one** short-lived music worker that exits when the room empties or playback stops.
-- Playback position lives in memory and is not persisted per second.
-
----
-
-## ✅ Requirements
-
-- Node.js **22** or newer
-- PostgreSQL 14+
-- A **LiveKit** project (Cloud or self-hosted)
-- A **Railway Storage Bucket** named `mahyar-music`
-- `ffmpeg` on the host (already installed in the Dockerfile)
-
----
-
-## 🚀 Local setup
+## 🚀 Local Development
 
 ```bash
-# 1) Install dependencies
+# Install dependencies
 npm ci
 
-# 2) Create the environment file
+# Create local environment file
 cp .env.example .env
-# Fill in real values in .env (never commit it)
 
-# 3) Prisma client + migrations
-npx prisma generate
-npx prisma migrate deploy
+# Generate Prisma Client and apply migrations
+npm run db:generate
+npm run db:migrate
 
-# 4) Run in development
+# Start development server
 npm run dev
 ```
 
-The app listens on `http://localhost:3000`:
+Routes:
 
-| Path | Description |
+| Path | Purpose |
 | --- | --- |
-| `/` | Redirects to `/fa` |
-| `/fa`, `/en` | Public landing pages |
-| `/app` | The application |
+| `/` | Redirects to Persian landing page |
+| `/fa` | Persian landing page |
+| `/en` | English landing page |
+| `/app` | Main application |
 
-### Production build
+Production build and start:
 
 ```bash
-npm run build     # Tailwind + LiveKit client bundle + tsc
-npm start         # node dist/server/index.js
+npm run build
+npm start
 ```
 
----
+## 🚂 Deploy on Railway
 
-## 🚂 Railway deployment
+1. Connect the repository to Railway.
+2. Add a Railway PostgreSQL service and reference its `DATABASE_URL` from the web service.
+3. Deploy the web service using the included Dockerfile.
+4. Configure JWT and LiveKit variables on the web service.
+5. Add a **Storage Bucket** to the same Railway project.
+6. Connect Bucket credentials to the web service using Railway Variable References.
+7. After deployment, open `/app` and test upload and playback.
 
-1. Connect the repository to Railway. `railway.json` and `Dockerfile` are already configured.
-2. Add the Railway **PostgreSQL** service and reference its `DATABASE_URL` from the web service.
-3. Set the LiveKit variables on the web service.
-4. Set `JWT_ACCESS_SECRET` to a random value of at least 32 characters.
-5. On the first deploy, migrations run automatically (`prisma migrate deploy` in the start command).
+### ☁️ Create a Railway Storage Bucket
 
-> ⚠️ Keep the service at **one** replica. Queue state is in process memory; multiple replicas would disagree.
+1. Open the Mahyar Gap project in Railway Dashboard.
+2. In the intended environment (usually Production), choose **Create → Bucket**.
+3. Name it e.g. `mahyar-music` and choose a region near the web service.
+4. Create the Bucket and open its **Credentials** tab.
+5. Reference the following values from the Bucket in the web service:
 
----
+| Variable | Value |
+| --- | --- |
+| `AWS_ENDPOINT_URL` | Endpoint shown in Credentials |
+| `AWS_ACCESS_KEY_ID` | Access key |
+| `AWS_SECRET_ACCESS_KEY` | Secret key |
+| `AWS_S3_BUCKET_NAME` | Actual S3 bucket identifier, not just the display name |
+| `AWS_DEFAULT_REGION` | Region shown in Credentials |
+| `AWS_S3_URL_STYLE` | Follow Credentials; usually `virtual-hosted` |
 
-## 🪣 Railway Bucket setup (step by step)
+**Important:** Keep secrets only in Railway Variables. Never commit them or expose them in browser code, README files, logs, or screenshots. The AWS SDK is used only for the S3-compatible protocol; Railway Bucket remains the only object-storage provider.
 
-This section assumes no backend experience. Follow the order exactly.
+### 📤 Music Upload and CORS
 
-1. Open the **Railway Dashboard**.
-2. Open your existing **Mahyar Gap** project.
-3. Click **New** and choose **Bucket**.
-4. Name the bucket `mahyar-music`.
-5. Pick a **region** close to your web service (same region means lower latency).
-6. Click **Deploy** and wait for the bucket to become ready.
-7. Open the bucket and switch to the **Credentials** tab.
-8. Connect those values to the **Mahyar Gap** web service. The cleanest way is a **Variable Reference**:
-   - Web service → **Variables** → **New Variable** → **Add Reference** → pick the bucket service, then add each value under the **same name** Railway suggests:
-     `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION`, `AWS_S3_URL_STYLE`.
-   - Manual entry works too: create those names on the web service and copy the values from the Credentials tab.
-9. Redeploy the service so the new variables are read.
-10. Sign in to the app, open a server, press **Library** in the music panel and upload an MP3.
-11. In a voice channel run `/mp play <track name>`.
-12. Final check: the audio must actually be **heard** in the voice room — not merely displayed in the UI.
+- The app first attempts a direct browser upload to the Bucket using a presigned URL.
+- If Bucket CORS blocks the browser PUT, the app automatically falls back to a same-origin streaming upload endpoint.
+- Therefore Bucket CORS is not required for the basic upload flow; configuring it only enables the direct path and reduces application-service egress.
+- The fallback streams the file without buffering the entire file in RAM, but its traffic passes through the Railway application service.
 
-### Railway native variable names
+### 🔐 Important Environment Variables
 
 | Variable | Purpose |
 | --- | --- |
-| `AWS_ENDPOINT_URL` | The bucket endpoint URL |
-| `AWS_ACCESS_KEY_ID` | The bucket access key |
-| `AWS_SECRET_ACCESS_KEY` | The bucket secret key |
-| `AWS_S3_BUCKET_NAME` | The S3 **bucket identifier** — not the display name |
-| `AWS_DEFAULT_REGION` | The bucket region |
-| `AWS_S3_URL_STYLE` | The URL style shown on the Credentials tab |
+| `DATABASE_URL` | PostgreSQL connection |
+| `JWT_ACCESS_SECRET` | JWT signing secret |
+| `LIVEKIT_URL` | LiveKit server URL |
+| `LIVEKIT_API_KEY` | LiveKit API key |
+| `LIVEKIT_API_SECRET` | LiveKit API secret |
+| `AWS_ENDPOINT_URL` | Railway Bucket endpoint |
+| `AWS_ACCESS_KEY_ID` | Bucket access key |
+| `AWS_SECRET_ACCESS_KEY` | Bucket secret key |
+| `AWS_S3_BUCKET_NAME` | S3 bucket identifier |
+| `AWS_DEFAULT_REGION` | Bucket region |
+| `AWS_S3_URL_STYLE` | Bucket URL addressing style |
+| `MUSIC_MAX_FILE_MB` | Per-file size limit; default 25 MB |
+| `MUSIC_SERVER_QUOTA_MB` | Per-server quota; default 500 MB |
+| `MUSIC_MAX_DURATION_SEC` | Maximum track length; default 1800 seconds |
+| `MUSIC_MAX_TRACKS` | Maximum tracks per server |
+| `MUSIC_MAX_QUEUE` | Maximum queue size |
 
-### Common mistakes
+See `.env.example` for the complete list. Use actual secrets from Railway Credentials.
 
-- **Take the bucket identifier from the Credentials tab.** `mahyar-music` in the dashboard is a display name and is not always the S3 bucket identifier. Filling `AWS_S3_BUCKET_NAME` with the display name yields `NoSuchBucket`.
-- **Read the URL style from the Credentials tab.** Railway Buckets default to **virtual-hosted** style, which is why the code runs with `forcePathStyle: false`. Only set `AWS_S3_URL_STYLE=path` when the credentials explicitly show path-style.
-- **Keep the bucket private.** Nothing is served publicly; downloads use short-lived signed URLs.
-- **Keys stay server-side.** No access key is ever sent to browser JavaScript or printed in logs.
-
-### Browser-direct uploads and CORS
-
-Music uploads use `presigned PUT`, so the browser writes to the bucket directly. That keeps application memory and bandwidth low.
-
-Railway exposes no CORS panel or variable — the rules only exist on the S3 API of the bucket itself. Without a matching rule the browser drops the `OPTIONS` preflight, never sends the `PUT`, and all the UI can report is:
-
-```
-Upload to storage failed: the browser could not reach the bucket.
-```
-
-**Diagnose and fix** with the script in this repository (it reads the same variables the server does):
+## 🧪 Tests and Verification
 
 ```bash
-# 1) Inspect the current rules and whether the app origin may PUT
-npm run bucket:cors -- --check --origin https://<your-app>.up.railway.app
-
-# 2) Write the rule for the app origin (add localhost for development if needed)
-npm run bucket:cors -- --apply https://<your-app>.up.railway.app http://localhost:3000
+npm run lint
+npm run build
+npm test
 ```
 
-On Railway, where there is no `.env` file, run the same script through the CLI:
+For real playback verification in the deployed environment:
 
-```bash
-railway run node scripts/bucket_cors.js --apply https://<your-app>.up.railway.app
-```
+1. Upload a small authorized MP3.
+2. Confirm that the track appears in the Music Library.
+3. Join the same Voice Channel from two independent browsers.
+4. Run `/mp play <track>` in one browser.
+5. Click **Enable Audio** in each browser if required.
+6. Test Pause/Resume/Skip and each listener's personal volume.
 
-The rule it writes: the given origins, methods `PUT, GET, HEAD`, headers `*`, `ETag` exposed, `MaxAgeSeconds=3000`. The app also exposes `GET /api/music/upload/diagnostics`, which reports whether a rule exists and whether the current origin may upload — that answer is what turns the opaque browser failure into a precise error message in the UI.
+A successful build or a visible Playing badge alone does not prove real playback.
 
-> **Honest status:** configuring CORS on a real Railway bucket has **not** been verified in this repository (no real credentials were available). The code and script follow the standard `PutBucketCORS` behaviour. If direct upload still fails in your environment, the fallback is streaming uploads through the application server, which raises application egress.
+## 🛠️ Troubleshooting
 
----
-
-## 🔐 Environment variables
-
-| Variable | Required | Default | Description |
-| --- | :---: | --- | --- |
-| `NODE_ENV` | ✅ | `production` | Runtime mode |
-| `PORT` | ➖ | `3000` | Service port (Railway injects it) |
-| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
-| `JWT_ACCESS_SECRET` | ✅ | — | At least 32 characters; enforced in production |
-| `BCRYPT_ROUNDS` | ➖ | `12` | Password hashing cost |
-| `LIVEKIT_URL` | ✅ | — | `wss://...` |
-| `LIVEKIT_API_KEY` | ✅ | — | Server-side only |
-| `LIVEKIT_API_SECRET` | ✅ | — | Server-side only |
-| `CORS_ORIGIN` | ➖ | — | Exact browser origin when it differs |
-| `AWS_ENDPOINT_URL` | ✅ for music/attachments | — | Railway bucket endpoint |
-| `AWS_ACCESS_KEY_ID` | ✅ | — | Bucket access key |
-| `AWS_SECRET_ACCESS_KEY` | ✅ | — | Bucket secret |
-| `AWS_S3_BUCKET_NAME` | ✅ | — | S3 bucket identifier |
-| `AWS_DEFAULT_REGION` | ➖ | `auto` | Bucket region |
-| `AWS_S3_URL_STYLE` | ➖ | `virtual-hosted` | `virtual-hosted` or `path` |
-| `MUSIC_MAX_FILE_MB` | ➖ | `25` | Max size per audio file |
-| `MUSIC_SERVER_QUOTA_MB` | ➖ | `500` | Per-server storage quota |
-| `MUSIC_MAX_DURATION_SEC` | ➖ | `1800` | Max track duration |
-| `MUSIC_MAX_TRACKS` | ➖ | `500` | Max tracks per server library |
-| `MUSIC_MAX_QUEUE` | ➖ | `50` | Max queued tracks per room |
-
-When the `AWS_*` variables are missing, music uploads and attachments answer an explicit `501` naming the missing variables. Nothing is simulated.
-
----
-
-## 🗄️ Database configuration
-
-```bash
-npx prisma generate          # build the client
-npx prisma migrate deploy    # apply migrations (production)
-npx prisma studio            # browse data (optional)
-```
-
-Existing migrations under `prisma/migrations` cover the initial schema, channel access, the per-server music toggle and the music library. Add a new migration for schema changes; never edit old migrations.
-
----
-
-## 🎧 Using the music library
-
-1. Open a server and a voice channel.
-2. In the **Mahyar Music** panel press **Library**.
-3. Choose or drag & drop an audio file (mp3, m4a, aac, ogg, opus, wav, flac).
-4. The server validates size, real content type and duration, then extracts metadata.
-5. The track appears in that server's shared library.
-
-Default limits: 25 MB per file, 500 MB per server, 30 minutes per track.
-
----
-
-## 🎵 Music commands
-
-| Command | Effect |
+| Problem | What to check |
 | --- | --- |
-| `/mp play <track name>` | Search the library and play for everyone |
-| `/mp queue` | Show the queue |
-| `/mp pause` | Pause playback |
-| `/mp resume` | Resume playback |
-| `/mp skip` | Skip to the next track |
-| `/mp stop` | Stop and clear the queue |
-| `/mp nowplaying` | Show the current track |
+| Upload fails | Bucket variables, credentials, file size, quota, and web-service logs |
+| CORS error | Same-origin streaming fallback should activate; if it does not, inspect Network and server logs |
+| Track not found | Confirm the file is in the same server's library and has not been deleted |
+| One member hears nothing | Click Enable Audio on that device; check local mute and browser volume |
+| Playback drifts | Check Socket.IO connectivity, network latency, and device load; zero-millisecond sync is not guaranteed |
+| Voice unavailable | Check LiveKit variables, browser microphone permissions, and logs |
+| Queue disappears after restart | The current queue is in-memory and is not persistent in this version |
 
-- By default everyone may upload, play, queue and control playback.
-- Volume and mute are **personal**: right-click `Mahyar Music` in the voice member list. Your volume never affects other listeners.
+## 🔒 Security and Limitations
 
----
-
-## 🎥 Using voice and video
-
-- Join by clicking a voice channel or pressing **Join Voice**.
-- In a text channel, a compact **Voice Dock** appears above the messages after connecting; it never covers the composer.
-- Controls: microphone, deafen, camera, screen share, audio/video settings and leave.
-- **Fullscreen**: the button in the voice room header; exit with the same button or `Escape`.
-- If the camera fails, the exact cause is shown (permission denied, no camera, camera in use, unsupported constraints…) and your microphone and connection stay intact.
+- The Bucket is private; file access uses authenticated endpoints and short-lived signed URLs.
+- Upload only audio you own or are authorized to share with your private group.
+- Never publish tokens, secrets, or presigned URLs in issues or public screenshots.
+- Railway Free limits depend on current credits, storage, egress, CPU, and RAM; they are not unlimited. Check the current Railway dashboard and official pricing documentation.
+- Browser playback depends on format support in the visitor's browser and operating system. MP3 is the recommended primary format.
 
 ---
 
-## 🔒 Security
-
-- Passwords are hashed with **bcrypt**; plaintext is never stored.
-- **JWT** access tokens (7 days) with refresh support (`/auth/refresh`).
-- **Server-side RBAC** on every operation; the UI only mirrors it.
-- Helmet with a strict CSP; the storage origin is explicitly added to `connect-src`.
-- Bucket objects are private; downloads use short-lived signed URLs.
-- Bucket and LiveKit keys are read server-side only and never appear in API responses or logs.
-- Rate limiting on `/api/` and `/auth/`.
-
----
-
-## 💳 Free plan limitations
-
-Mahyar Gap is tuned for the Railway Free plan, but "free" is not "unlimited":
-
-| Topic | Reality |
-| --- | --- |
-| Bucket allowance | Up to **10 GB-month** on the Free plan |
-| Storage billing | Based on **actual usage**, charged against the **monthly usage credit** |
-| Bucket API operations | No additional usage charge |
-| Bucket egress | No additional usage charge |
-| Application service egress | **Separate** and billed |
-| Music playback in LiveKit | The bot publishing audio uses **application service** resources |
-| Credit exhausted | Storage access can be **suspended** |
-
-Practical consequences:
-
-- Storage is not unlimited free storage; keep the quotas sensible for five users (`MUSIC_MAX_FILE_MB`, `MUSIC_SERVER_QUOTA_MB`).
-- Free bucket egress does **not** make music playback entirely free: publishing the bot's audio to LiveKit consumes CPU and network on the application service.
-- Remove unused tracks so the monthly allowance is not wasted.
-
-Always check Railway's current Pricing page and official documentation for exact, up-to-date numbers; this table summarises Free-plan behaviour at the time of writing.
-
----
-
-## 🧰 Troubleshooting
-
-<details>
-<summary><b>Music upload returns 501</b></summary>
-
-The `AWS_*` variables are incomplete. The API response lists them in `missingVariables`; set them on the web service and redeploy.
-</details>
-
-<details>
-<summary><b>NoSuchBucket or 403 while uploading</b></summary>
-
-Use the bucket identifier from the Credentials tab (not the display name), then verify the URL style: virtual-hosted is the default, and path-style requires `AWS_S3_URL_STYLE=path`.
-</details>
-
-<details>
-<summary><b>Browser upload stops with a CORS error</b></summary>
-
-The bucket has no CORS rule for the app origin. Allow the origin, methods `PUT, GET, HEAD`, headers `*`, and expose `ETag`. If your bucket cannot do that, uploads must stream through the server (higher application egress).
-</details>
-
-<details>
-<summary><b>The bot joins but no audio is heard</b></summary>
-
-A bot connection or a successful command is not proof of playback. Check that `ffmpeg` exists in the image (it is installed in the Dockerfile), the object exists in the bucket, and `Mahyar Music` is not muted locally. Inspect the music worker logs and CPU for a real diagnosis.
-</details>
-
-<details>
-<summary><b>The camera will not start</b></summary>
-
-The message names the cause: permission denied, no camera, camera already in use, or unsupported constraints. Pick the right camera in Audio & Video settings. A camera error never disconnects your microphone or the room.
-</details>
-
-<details>
-<summary><b>Fullscreen does nothing</b></summary>
-
-The fullscreen control exists in the voice room header. Exit with the same button or `Escape`. If the browser blocks it, a clear message is shown (this happens inside iframes or kiosk mode).
-</details>
-
-<details>
-<summary><b>The landing page is missing</b></summary>
-
-`/fa` and `/en` are served from `public/landing`. Confirm `public/landing/fa.html` and `en.html` are copied into the image (the Dockerfile copies the whole `public` folder).
-</details>
-
----
-
-## ⚠️ Known limitations
-
-- Designed for **one replica**; queue state is in process memory.
-- The only playback source is the server's shared library. Spotify, SoundCloud and YouTube are intentionally unsupported.
-- Direct-upload CORS behaviour on a **real Railway Bucket** is not verified with this repository's credentials; configure CORS if the browser refuses uploads.
-- Server-side validation writes the audio to a temporary file for `ffprobe` (bounded and cleaned up), even though the upload itself never passes through application memory.
-- Each concurrently active voice room runs its own music worker; keep active rooms low on the Free plan.
-- The application UI is English; the landing pages are Persian and English.
-
----
-
-## 📄 Ownership
-
-This is a private project for a small group of friends. Uploaded audio must be owned by or licensed to that group.
-
----
-
-Built for friends — **Your Friends. Your Space. Your Music.**
+<p align="center"><strong>MAHYAR GAP</strong><br/>Your Friends. Your Space. Your Music. 💜</p>

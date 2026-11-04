@@ -334,7 +334,7 @@ model Ban {
 
 // ---------------------------------------------------------------------------
 // Shared music library. Only metadata lives in PostgreSQL; the audio bytes live
-// in the private S3-compatible object store (e.g. Cloudflare R2) and are read
+// in the private Railway Storage Bucket (S3-compatible) and are read
 // through short-lived signed URLs. One row per uploaded file per server.
 // ---------------------------------------------------------------------------
 model MusicTrack {

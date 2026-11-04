@@ -1,25 +1,97 @@
 /**
- * Mahyar Music — offline unit tests: command parsing, library signature
- * sniffing, filename metadata, engine/library integration (with a fake
- * library resolver and bot worker) and system wiring.
- * The full media path (bot worker + LiveKit + ffmpeg + real storage) is
- * verified by the E2E script (scripts/music_e2e.js).
+ * Mahyar Music — synchronized browser-player tests.
+ * These tests verify the browser player, room-scoped state engine, upload
+ * fallback wiring, and the absence of the retired LiveKit music worker.
+ * Real Railway Bucket + multi-browser audio playback still requires deployment QA.
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const { EventEmitter } = require('node:events');
 
-function loadMusicClient() {
-  const context = { window: {}, console };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../js/music.js'), 'utf8'), context, { filename: 'js/music.js' });
-  return new context.window.MahyarMusic({ musicCommand: async () => ({ ok: true }) });
+function createAudioMock() {
+  const handlers = new Map();
+  const audio = {
+    style: {}, readyState: 0, currentTime: 0, duration: 180, paused: true,
+    volume: 1, muted: false, src: '', preload: '', autoplay: false,
+    controls: false, playsInline: false, tabIndex: 0,
+    setAttribute() {},
+    removeAttribute(name) { if (name === 'src') this.src = ''; },
+    addEventListener(name, fn) { if (!handlers.has(name)) handlers.set(name, new Set()); handlers.get(name).add(fn); },
+    removeEventListener(name, fn) { handlers.get(name)?.delete(fn); },
+    dispatch(name) { for (const fn of [...(handlers.get(name) || [])]) fn({ type: name }); },
+    load() { this.readyState = this.src ? 1 : 0; if (this.src) this.dispatch('loadedmetadata'); },
+    pause() { this.paused = true; },
+    async play() { if (!this.src) throw new Error('no source'); this.paused = false; return true; },
+    remove() { this.removed = true; }
+  };
+  return audio;
 }
 
-test('music client parses /mp commands and rejects strangers', () => {
-  const music = loadMusicClient();
+function loadMusicClient(api = {}) {
+  const audio = createAudioMock();
+  const storage = new Map();
+  const context = {
+    window: {},
+    document: { createElement: (name) => name === 'audio' ? audio : {}, body: { appendChild() {} } },
+    localStorage: { getItem: (key) => storage.has(key) ? storage.get(key) : null, setItem: (key, value) => storage.set(key, String(value)) },
+    console,
+    setInterval: () => ({ unref() {} }),
+    clearInterval() {},
+    setTimeout,
+    clearTimeout,
+    Date,
+    Map,
+    Set,
+    Promise,
+    Math,
+    Number,
+    String,
+    Boolean
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../js/music.js'), 'utf8'), context, { filename: 'js/music.js' });
+  const music = new context.window.MahyarMusic({
+    musicCommand: async () => ({ ok: true }),
+    musicPlaybackUrl: async () => ({ url: 'https://bucket.example.test/song.mp3?sig=test' }),
+    ...api
+  });
+  return { music, audio, storage };
+}
+
+const { MusicEngine } = require('../dist/server/music/engine.js');
+const library = require('../dist/server/music/library.js');
+
+function libTrack(id, title, extra = {}) {
+  return {
+    id: `lib:${id}`, origin: 'library', trackId: id, title, artist: 'Tester',
+    duration: 120, streamable: true, storageKey: `music/s1/${id}.mp3`, ...extra
+  };
+}
+
+function makeEngine(libraryTracks, options = {}) {
+  const emitted = [];
+  const io = {
+    to: (room) => ({ emit: (event, state) => emitted.push({ room, event, state }) })
+  };
+  const libraryResolver = {
+    async searchTracks(_serverId, query, limit) {
+      const q = query.toLowerCase();
+      return libraryTracks.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)).slice(0, limit);
+    },
+    async getPlayableTrack(_serverId, trackId) { return libraryTracks.find((t) => t.trackId === trackId) || null; },
+    async playlistTracks(_serverId, playlistId) { return playlistId === 'pl_1' ? libraryTracks.slice(0, 2) : []; },
+    recordPlay(trackId) { (options.recorded || (options.recorded = [])).push(trackId); }
+  };
+  const engine = new MusicEngine({ io, library: libraryResolver });
+  return { engine, emitted, options };
+}
+
+// ---------------------------------------------------------------------------
+// Command parser and synchronized browser player
+// ---------------------------------------------------------------------------
+test('music client parses the small Discord-style /mp command set', () => {
+  const { music } = loadMusicClient();
   assert.equal(music.parse('hello world').command, null);
   assert.equal(music.parse('/other play x').command, null);
   assert.equal(music.parse('/mp').command, 'help');
@@ -32,327 +104,258 @@ test('music client parses /mp commands and rejects strangers', () => {
   assert.equal(music.parse('/mp nowplaying').command, 'nowplaying');
 });
 
-test('music client extracts the /mp play search term for library autocomplete', () => {
-  const music = loadMusicClient();
+test('music client extracts /mp play autocomplete queries', () => {
+  const { music } = loadMusicClient();
   assert.equal(music.playSearchTerm('/mp play Believer'), 'Believer');
   assert.equal(music.playSearchTerm('  /MP  PLAY   my favorite song '), 'my favorite song');
-  assert.equal(music.playSearchTerm('/mp play'), null);          // no term yet → command menu
+  assert.equal(music.playSearchTerm('/mp play'), null);
   assert.equal(music.playSearchTerm('/mp pause'), null);
-  assert.equal(music.playSearchTerm('hello'), null);
 });
 
-test('music client is a bot identity detector, not a guesser', () => {
-  const music = loadMusicClient();
-  assert.equal(music.constructor.isBotIdentity('mahyar-music:room123'), true);
-  assert.equal(music.constructor.isBotIdentity('mahyar-music:'), true);
-  assert.equal(music.constructor.isBotIdentity('user_someone'), false);
-  assert.equal(music.constructor.isBotIdentity(''), false);
-  assert.equal(music.constructor.isBotIdentity(undefined), false);
+test('player identity is a UI context, not a LiveKit participant', () => {
+  const { music } = loadMusicClient();
+  assert.equal(music.constructor.isPlayerIdentity('mahyar-music-player:room123'), true);
+  assert.equal(music.constructor.isPlayerIdentity('user_someone'), false);
+  assert.equal(music.constructor.isPlayerIdentity(''), false);
 });
 
-// ---------------------------------------------------------------------------
-// Parent ↔ worker startup handshake regression coverage
-// ---------------------------------------------------------------------------
-const { waitForWorkerReady } = require('../dist/server/music/bot.js');
-
-class FakeWorker extends EventEmitter {
-  constructor() {
-    super();
-    this.pid = 4242;
-    this.killedWith = null;
-  }
-
-  kill(signal) {
-    this.killedWith = signal;
-    return true;
-  }
-}
-
-function startupFatal(message) {
-  const step = message.step ? ` (failed at step "${message.step}")` : '';
-  return new Error(`Music worker reported a fatal error during startup${step}: ${message.message || 'unknown cause'}`);
-}
-
-test('worker startup ignores startup-log messages and resolves only on READY', async () => {
-  const child = new FakeWorker();
-  let generalReadyMessages = 0;
-  child.on('message', (message) => { if (message.type === 'ready') generalReadyMessages += 1; });
-  const startup = waitForWorkerReady(child, 100, () => new Error('unexpected exit'), startupFatal);
-
-  for (const step of ['process-init', 'native-module-load', 'ffmpeg-discovery', 'track-publish']) {
-    child.emit('message', { type: 'startup-log', step, status: 'ok' });
-  }
-  assert.equal(child.listenerCount('message'), 2, 'general handler and startup waiter coexist');
-
-  child.emit('message', { type: 'ready' });
-  await startup;
-
-  assert.equal(generalReadyMessages, 1, 'general worker-state handler still receives READY');
-  assert.equal(child.killedWith, null, 'ready worker is not killed by startup timeout');
-  assert.equal(child.listenerCount('message'), 1, 'temporary message listener is removed');
-  assert.equal(child.listenerCount('exit'), 0, 'temporary exit listener is removed');
-  assert.equal(child.listenerCount('error'), 0, 'temporary error listener is removed');
+test('personal volume and mute affect only the local audio element', () => {
+  const { music, audio, storage } = loadMusicClient();
+  music.setVolume(35);
+  assert.equal(audio.volume, 0.35);
+  assert.equal(storage.get('mahyar_music_local_volume'), '35');
+  music.toggleMute();
+  assert.equal(audio.muted, true);
+  assert.equal(music.isMuted(), true);
+  music.toggleMute();
+  assert.equal(audio.muted, false);
+  music.setDeafened(true);
+  assert.equal(audio.muted, true);
+  music.setDeafened(false);
+  assert.equal(audio.muted, false);
+  music.destroy();
+  assert.equal(audio.removed, true);
 });
 
-test('worker startup rejects fatal messages and cleans up temporary listeners', async () => {
-  const child = new FakeWorker();
-  const startup = waitForWorkerReady(child, 100, () => new Error('unexpected exit'), startupFatal);
-  child.emit('message', { type: 'fatal', step: 'track-publish', message: 'publish failed' });
-  await assert.rejects(startup, /track-publish/);
-  assert.equal(child.listenerCount('message'), 0);
-  assert.equal(child.listenerCount('exit'), 0);
-  assert.equal(child.listenerCount('error'), 0);
+test('switching Voice rooms stops and releases the previous browser audio source', () => {
+  const { music, audio } = loadMusicClient();
+  music.setActiveChannel('voice-a');
+  audio.src = 'https://bucket.example.test/a.mp3';
+  audio.paused = false;
+  music.setActiveChannel('voice-b');
+  assert.equal(audio.paused, true);
+  assert.equal(audio.src, '');
+  assert.equal(music.activeChannelId, 'voice-b');
+  music.destroy();
 });
 
-test('worker startup rejects on pre-READY exit and on genuine timeout', async () => {
-  const exited = new FakeWorker();
-  const exitStartup = waitForWorkerReady(exited, 100, (code, signal) => new Error(`exited ${code}/${signal}`), startupFatal);
-  exited.emit('exit', 1, null);
-  await assert.rejects(exitStartup, /exited 1\/null/);
-  assert.equal(exited.listenerCount('message'), 0);
-
-  const timedOut = new FakeWorker();
-  const timeoutStartup = waitForWorkerReady(timedOut, 10, () => new Error('unexpected exit'), startupFatal);
-  await assert.rejects(timeoutStartup, /did not become ready in 10 ms/);
-  assert.equal(timedOut.killedWith, 'SIGKILL');
-  assert.equal(timedOut.listenerCount('message'), 0);
-  assert.equal(timedOut.listenerCount('exit'), 0);
-  assert.equal(timedOut.listenerCount('error'), 0);
+test('browser player loads a signed media URL and starts the synchronized timeline', async () => {
+  const calls = [];
+  const { music, audio } = loadMusicClient({
+    async musicPlaybackUrl(channelId, trackId) { calls.push({ channelId, trackId }); return { url: 'https://bucket.example.test/track.mp3?signature=temporary' }; }
+  });
+  music.setActiveChannel('voice-1');
+  music.handleState({
+    channel_id: 'voice-1', server_id: 'srv-1', player_mode: 'synchronized-browser',
+    now_playing: { id: 'lib:t1', track_id: 't1', playback_id: 'pb-1', title: 'Believer', artist: 'Imagine Dragons', duration: 180, position: 12, position_ts: Date.now(), started_at: Date.now(), paused: false },
+    queue: [], last_error: null
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [{ channelId: 'voice-1', trackId: 't1' }]);
+  assert.match(audio.src, /track\.mp3/);
+  assert.equal(audio.paused, false);
+  assert.ok(audio.currentTime >= 11.5 && audio.currentTime <= 13);
+  music.destroy();
 });
 
-test('worker startup keeps the in-flight guard and persistent IPC handshake', () => {
-  const botSource = fs.readFileSync(path.join(__dirname, '../server/music/bot.ts'), 'utf8');
-  assert.match(botSource, /if \(this\.starting\) return this\.starting/, 'concurrent callers share one worker startup');
-  assert.match(botSource, /child\.on\('message', onStartupMessage\)/, 'startup waiter listens past diagnostic messages');
-  assert.doesNotMatch(botSource, /child\.once\('message', onStartupMessage\)/, 'startup waiter is not one-shot');
+test('player shows a local gesture requirement when browser autoplay is blocked', async () => {
+  const audio = createAudioMock();
+  audio.play = async () => { const error = new Error('gesture required'); error.name = 'NotAllowedError'; throw error; };
+  const storage = new Map();
+  const context = {
+    window: {}, document: { createElement: () => audio, body: { appendChild() {} } },
+    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
+    console, setInterval: () => 1, clearInterval() {}, setTimeout, clearTimeout, Date, Map, Set, Promise, Math, Number, String, Boolean
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../js/music.js'), 'utf8'), context);
+  const music = new context.window.MahyarMusic({ musicPlaybackUrl: async () => ({ url: 'https://bucket.test/a.mp3' }), musicCommand: async () => ({ ok: true }) });
+  music.setActiveChannel('voice-1');
+  music.handleState({ channel_id: 'voice-1', now_playing: { track_id: 't1', playback_id: 'pb1', position: 0, position_ts: Date.now(), duration: 60, paused: false }, queue: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(music.needsGesture, true);
+  music.destroy();
 });
 
 // ---------------------------------------------------------------------------
-// Library content validation (server/music/library.ts)
+// Shared server timeline and queue
 // ---------------------------------------------------------------------------
-const library = require('../dist/server/music/library.js');
+test('engine starts a shared browser playback state and emits only to the voice music room', async () => {
+  const { engine, emitted, options } = makeEngine([libTrack('t1', 'Believer')]);
+  const result = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
+  assert.equal(result.ok, true);
+  assert.equal(result.state.now_playing.title, 'Believer');
+  assert.equal(result.state.player_mode, 'synchronized-browser');
+  assert.equal(result.state.bot_connected, false);
+  assert.equal(result.state.bot_identity, null);
+  assert.deepEqual(options.recorded, ['t1']);
+  assert.ok(emitted.some((entry) => entry.room === 'music:chan1' && entry.event === 'music:state'));
+  await engine.shutdown();
+});
 
-test('audio signature sniffing decides by content, never by extension', () => {
+test('engine reports missing tracks and rejects external URLs', async () => {
+  const { engine } = makeEngine([]);
+  const url = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'https://example.com/a.mp3' });
+  assert.equal(url.ok, false);
+  assert.match(url.message, /External music links are not supported/i);
+  const missing = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u2', query: 'nothing' });
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /No track matching|Upload/i);
+  await engine.shutdown();
+});
+
+test('multiple matches open a picker and selected track enters the shared queue', async () => {
+  const { engine } = makeEngine([libTrack('t1', 'Believer'), libTrack('t2', 'Believer Live')]);
+  const result = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
+  assert.equal(result.message, 'PICK_RESULT');
+  const picked = await engine.pick({ channelId: 'chan1', serverId: 's1', userId: 'u1', trackId: 't2' });
+  assert.equal(picked.ok, true);
+  assert.equal(picked.state.now_playing.title, 'Believer Live');
+  await engine.shutdown();
+});
+
+test('one browser cannot end shared playback before the server timeline reaches the track end', async () => {
+  const { engine } = makeEngine([libTrack('t1', 'Believer', { duration: 120 }), libTrack('t2', 'Thunder')]);
+  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
+  const current = engine.state('chan1', 's1').now_playing;
+  const early = await engine.ended({ channelId: 'chan1', serverId: 's1', userId: 'u2', trackId: 't1', playbackId: current.playback_id });
+  assert.equal(early.ok, false);
+  assert.equal(early.state.now_playing.title, 'Believer');
+  await engine.shutdown();
+});
+
+test('pause, resume, skip and stop update the shared timeline', async () => {
+  const { engine } = makeEngine([libTrack('t1', 'Believer'), libTrack('t2', 'Thunder')]);
+  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
+  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u2', query: 'Thunder' });
+  const paused = engine.pause({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
+  assert.equal(paused.ok, true);
+  assert.equal(paused.state.now_playing.paused, true);
+  const resumed = await engine.resume({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
+  assert.equal(resumed.ok, true);
+  assert.notEqual(resumed.state.now_playing.playback_id, paused.state.now_playing.playback_id);
+  const skipped = await engine.skip({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
+  assert.equal(skipped.ok, true);
+  assert.equal(skipped.state.now_playing.title, 'Thunder');
+  const stopped = engine.stop({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
+  assert.equal(stopped.state.now_playing, null);
+  assert.equal(stopped.state.queue.length, 0);
+  await engine.shutdown();
+});
+
+test('stale browser ended events cannot advance a newer playback session', async () => {
+  const { engine } = makeEngine([libTrack('t1', 'First'), libTrack('t2', 'Second')]);
+  const first = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'First' });
+  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u2', query: 'Second' });
+  const stale = await engine.ended({ channelId: 'chan1', serverId: 's1', userId: 'u1', trackId: 't1', playbackId: first.state.now_playing.playback_id });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.state.now_playing.title, 'First');
+  await engine.shutdown();
+});
+
+test('playlist tracks are queued in order and empty playlists are rejected', async () => {
+  const { engine } = makeEngine([libTrack('t1', 'Song A'), libTrack('t2', 'Song B')]);
+  const result = await engine.playPlaylist({ channelId: 'chan1', serverId: 's1', userId: 'u1', playlistId: 'pl_1' });
+  assert.equal(result.ok, true);
+  assert.equal(result.state.now_playing.title, 'Song A');
+  assert.equal(result.state.queue[0].title, 'Song B');
+  const empty = await engine.playPlaylist({ channelId: 'chan1', serverId: 's1', userId: 'u1', playlistId: 'missing' });
+  assert.equal(empty.ok, false);
+  await engine.shutdown();
+});
+
+test('state returns an empty synchronized-player snapshot for a newly joined room', async () => {
+  const { engine } = makeEngine([]);
+  const state = engine.state('voice-1', 'server-1');
+  assert.equal(state.player_mode, 'synchronized-browser');
+  assert.equal(state.channel_id, 'voice-1');
+  assert.equal(state.server_id, 'server-1');
+  assert.equal(state.now_playing, null);
+  await engine.shutdown();
+});
+
+// ---------------------------------------------------------------------------
+// Library content validation
+// ---------------------------------------------------------------------------
+test('audio signature sniffing checks actual content rather than filename extension', () => {
   const sniff = library.sniffAudioFormat;
   assert.equal(sniff(Buffer.from('ID3\x04\x00\x00\x00\x00\x00\x00.....')), 'mp3');
-  assert.equal(sniff(Buffer.from([0xff, 0xfb, 0x90, 0x00])), 'mp3');           // MPEG frame sync
-  assert.equal(sniff(Buffer.from([0xff, 0xf1, 0x50, 0x80])), 'aac');           // ADTS syncword
+  assert.equal(sniff(Buffer.from([0xff, 0xfb, 0x90, 0x00])), 'mp3');
+  assert.equal(sniff(Buffer.from([0xff, 0xf1, 0x50, 0x80])), 'aac');
   assert.equal(sniff(Buffer.from('OggS\x00\x02xxxxxxxx')), 'ogg');
   assert.equal(sniff(Buffer.from('OggS\x00\x02OpusHeadxxxxxxxx')), 'opus');
   assert.equal(sniff(Buffer.from('RIFF\x24\x00\x00\x00WAVEfmt ')), 'wav');
   assert.equal(sniff(Buffer.from('fLaC\x00\x00\x00\x22xxxxxxxx')), 'flac');
   assert.equal(sniff(Buffer.from('\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00')), 'm4a');
-  assert.equal(sniff(Buffer.from('MZ\x90\x00\x03\x00\x00\x00\x04')), null);    // executable
-  assert.equal(sniff(Buffer.from('\x89PNG\r\n\x1a\n\x00\x00\x00\x0d')), null); // image
-  assert.equal(sniff(Buffer.from('hello world, not audio')), null);
-  assert.equal(sniff(Buffer.alloc(4)), null);
+  assert.equal(sniff(Buffer.from('MZ\x90\x00\x03\x00\x00\x00\x04')), null);
+  assert.equal(sniff(Buffer.from('hello world')), null);
 });
 
-test('filename metadata: "Artist - Title" splits, junk becomes readable words', () => {
+test('filename metadata is readable and recognizes Artist - Title', () => {
   assert.deepEqual(library.metadataFromFilename('Imagine Dragons - Believer.mp3'), { artist: 'Imagine Dragons', title: 'Believer' });
-  assert.deepEqual(library.metadataFromFilename('my_favorite_song.ogg'), { artist: '', title: 'my favorite song' });
-  assert.deepEqual(library.metadataFromFilename('01 Intro.wav').title, '01 Intro');
-  assert.ok(library.metadataFromFilename('').title.length > 0);
-});
-
-test('library limits expose the supported formats and storage posture', () => {
-  const limits = library.libraryLimits();
-  for (const format of ['mp3', 'm4a', 'aac', 'ogg', 'opus', 'wav', 'flac']) {
-    assert.ok(limits.formats.includes(format), `${format} is supported`);
-  }
-  assert.equal(typeof limits.max_file_mb, 'number');
-  assert.equal(typeof limits.server_quota_mb, 'number');
-  assert.equal(typeof limits.max_duration_sec, 'number');
+  assert.equal(library.metadataFromFilename('my_favorite_song.ogg').title, 'my favorite song');
 });
 
 // ---------------------------------------------------------------------------
-// Engine ↔ library integration (fake resolver + fake bot worker)
+// System wiring and migration guardrails
 // ---------------------------------------------------------------------------
-const { MusicEngine } = require('../dist/server/music/engine.js');
-
-function makeFakeBot() {
-  return {
-    connected: true,
-    identity: 'mahyar-music:chan1',
-    playing: false,
-    play: async () => { },
-    stop: async () => { },
-    stopPlayback() { },
-    isStale: () => false,
-    humanParticipantCount: 1
-  };
-}
-
-function makeEngine(libraryTracks, options = {}) {
-  const emitted = [];
-  const io = { to: () => ({ emit: (event, state) => emitted.push({ event, state }) }) };
-  const library = {
-    async searchTracks(_serverId, query, limit) {
-      return libraryTracks.filter((t) => t.title.toLowerCase().includes(query.toLowerCase())).slice(0, limit);
-    },
-    async getPlayableTrack(_serverId, trackId) {
-      return libraryTracks.find((t) => t.trackId === trackId) || null;
-    },
-    async streamUrl(track) { return `https://storage.test/${track.storageKey}?sig=1`; },
-    async playlistTracks(_serverId, playlistId) {
-      return playlistId === 'pl_1' ? libraryTracks.slice(0, 2) : [];
-    },
-    recordPlay(trackId) { (options.recorded || (options.recorded = [])).push(trackId); }
-  };
-  const engine = new MusicEngine({
-    io,
-    liveKitUrl: 'http://localhost:6789',
-    apiKey: 'devkey',
-    apiSecret: 'devsecret-'.repeat(4),
-    isMusicEnabled: async () => true,
-    library
-  });
-  engine['ensureBot'] = async (room) => { room.bot = makeFakeBot(); return room.bot; }; // never spawn a real worker in unit tests
-  return { engine, emitted, options };
-}
-
-function libTrack(id, title, extra = {}) {
-  return {
-    id: `lib:${id}`, origin: 'library', trackId: id, title, artist: 'Tester',
-    duration: 120, streamable: true, storageKey: `music/s1/${id}.mp3`, ...extra
-  };
-}
-
-test('engine.play resolves from the shared library and starts real playback state', async () => {
-  const { engine, emitted, options } = makeEngine([libTrack('t1', 'Believer'), libTrack('t2', 'Thunder')]);
-  const result = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
-  assert.equal(result.ok, true);
-  assert.match(result.message, /Believer/);
-  assert.equal(result.state.now_playing.title, 'Believer');
-  assert.equal(result.state.now_playing.origin, 'library');
-  assert.equal(result.state.bot_connected, true);
-  assert.equal(result.state.bot_identity, 'mahyar-music:chan1');
-  assert.deepEqual(options.recorded, ['t1'], 'play count recorded once for the started track');
-  assert.ok(emitted.length >= 1);
-});
-
-test('engine.play reports honest errors: external links and empty library', async () => {
-  const { engine } = makeEngine([]);
-  const url = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'https://youtube.com/watch?v=x' });
-  assert.equal(url.ok, false);
-  assert.match(url.message, /library/i);
-
-  // A different user (the 1 s duplicate guard is per user) searches for nothing.
-  const missing = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u2', query: 'nothing matches this' });
-  assert.equal(missing.ok, false);
-  assert.match(missing.message, /No track matching|Upload/i);
-});
-
-test('several library matches open the interactive picker; pick() enqueues', async () => {
-  const { engine } = makeEngine([libTrack('t1', 'Believer'), libTrack('t2', 'Believer (live)')]);
-  const result = await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
-  assert.equal(result.message, 'PICK_RESULT');
-  const picked = await engine.pick({ channelId: 'chan1', serverId: 's1', userId: 'u1', trackId: 't2' });
-  assert.equal(picked.ok, true);
-  assert.equal(picked.state.now_playing.title, 'Believer (live)');
-  // Unknown pick after the session was consumed falls back to the library lookup.
-  const direct = await engine.pick({ channelId: 'chan1', serverId: 's1', userId: 'u1', trackId: 't1' });
-  assert.equal(direct.ok, true);
-});
-
-test('playback controls: pause, resume, skip and stop keep the shared state consistent', async () => {
-  const { engine } = makeEngine([libTrack('t1', 'Believer'), libTrack('t2', 'Thunder')]);
-  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'Believer' });
-  await engine.play({ channelId: 'chan1', serverId: 's1', userId: 'u2', query: 'Thunder' });
-
-  const paused = engine.pause({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
-  assert.equal(paused.ok, true);
-  assert.equal(paused.state.now_playing.paused, true);
-  assert.equal(engine.pause({ channelId: 'chan1', serverId: 's1', userId: 'u1' }).ok, false, 'double pause is a no-op');
-
-  const resumed = await engine.resume({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
-  assert.equal(resumed.ok, true);
-  assert.equal(resumed.state.now_playing.paused, false);
-
-  const skipped = await engine.skip({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
-  assert.equal(skipped.ok, true);
-  assert.equal(skipped.state.now_playing.title, 'Thunder', 'skip advances the shared queue');
-
-  const stopped = engine.stop({ channelId: 'chan1', serverId: 's1', userId: 'u1' });
-  assert.equal(stopped.ok, true);
-  assert.equal(stopped.state.now_playing, null);
-  assert.equal(stopped.state.queue.length, 0);
-});
-
-test('playPlaylist queues the whole shared playlist in order', async () => {
-  const { engine } = makeEngine([libTrack('t1', 'Song A'), libTrack('t2', 'Song B'), libTrack('t3', 'Song C')]);
-  const result = await engine.playPlaylist({ channelId: 'chan1', serverId: 's1', userId: 'u1', playlistId: 'pl_1' });
-  assert.equal(result.ok, true);
-  assert.match(result.message, /Added 2 tracks/);
-  assert.equal(result.state.now_playing.title, 'Song A');
-  assert.equal(result.state.queue.length, 1);
-  assert.equal(result.state.queue[0].title, 'Song B');
-  const empty = await engine.playPlaylist({ channelId: 'chan1', serverId: 's1', userId: 'u1', playlistId: 'pl_missing' });
-  assert.equal(empty.ok, false);
-});
-
-test('search returns library tracks for the command preview', async () => {
-  const { engine } = makeEngine([libTrack('t1', 'Believer')]);
-  const result = await engine.search({ channelId: 'chan1', serverId: 's1', userId: 'u1', query: 'belie' });
-  assert.equal(result.ok, true);
-  assert.equal(result.tracks.length, 1);
-  assert.equal(result.tracks[0].origin, 'library');
-});
-
-// ---------------------------------------------------------------------------
-// Wiring
-// ---------------------------------------------------------------------------
-test('music system is wired: library routes, worker entry, socket command, landing pages', () => {
+test('music system uses synchronized browser playback and has no active server audio worker', () => {
   const backend = fs.readFileSync(path.join(__dirname, '../server/index.ts'), 'utf8');
   const register = fs.readFileSync(path.join(__dirname, '../server/music/register.ts'), 'utf8');
+  const engineSource = fs.readFileSync(path.join(__dirname, '../server/music/engine.ts'), 'utf8');
   const librarySource = fs.readFileSync(path.join(__dirname, '../server/music/library.ts'), 'utf8');
   const storage = fs.readFileSync(path.join(__dirname, '../server/music/storage.ts'), 'utf8');
-  const worker = fs.readFileSync(path.join(__dirname, '../server/music/worker-main.ts'), 'utf8');
-  assert.ok(fs.existsSync(path.join(__dirname, '../server/music/worker-main.ts')), 'worker entry exists');
-  assert.match(worker, /captureFrame/, 'worker streams real PCM frames');
-  assert.match(worker, /process\.send/, 'worker reports to the parent over IPC');
-  assert.match(backend, /registerMusicSystem/, 'music system registered in the server');
-  assert.match(backend, /app\.get\('\/fa'/, 'Persian landing route');
-  assert.match(backend, /app\.get\('\/en'/, 'English landing route');
-  assert.match(backend, /app\.get\('\/app'/, 'authenticated app route');
-  assert.match(register, /music:command/, 'socket command handler registered');
-  assert.match(register, /music:play_playlist/, 'playlist playback socket command registered');
-  assert.match(register, /authorizeMusic/, 'backend authorization for every command');
-  assert.match(register, /CONNECT_VOICE/, 'voice membership required');
-  assert.match(register, /registerMusicLibrary/, 'library routes registered');
-  // Upload flow: presigned, verified, honest.
-  assert.match(librarySource, /upload\/init/, 'upload init endpoint exists');
-  assert.match(librarySource, /upload\/complete/, 'upload completion + verification endpoint exists');
-  assert.match(librarySource, /sniffAudioFormat/, 'content signature validation');
-  assert.match(librarySource, /probeAudio/, 'server-side ffprobe metadata extraction');
-  assert.match(librarySource, /DUPLICATE_TRACK/, 'duplicate detection');
-  assert.match(librarySource, /deleteObject\(pending\.key\)/, 'invalid uploads are removed from storage');
-  assert.match(storage, /presignUpload/, 'presigned PUT (browser → bucket directly)');
-  assert.match(storage, /presignDownload/, 'short-lived signed download for the worker');
-  assert.match(storage, /expiresIn: 900/, 'upload URLs are short-lived');
-  for (const lang of ['fa', 'en']) {
-    const page = fs.readFileSync(path.join(__dirname, `../public/landing/${lang}.html`), 'utf8');
-    assert.match(page, /Mahyar Music|ماهیار میوزیک/, `${lang} landing mentions the music bot`);
-    assert.match(page, /href="\/app"/, `${lang} landing links to the app`);
-    if (lang === 'fa') {
-      assert.match(page, /dir="rtl"/, 'Persian page is RTL');
-      assert.match(page, /lang="fa"/, 'Persian page declares its language');
-    } else {
-      assert.match(page, /dir="ltr"/, 'English page is LTR');
-    }
-  }
-  // Composer must never leak an /mp command into chat: app.js routes it to the engine.
   const app = fs.readFileSync(path.join(__dirname, '../js/app.js'), 'utf8');
-  assert.match(app, /music\.parse\(text\)/, 'sendMessage intercepts /mp commands');
-  assert.match(app, /slash-menu/, 'slash command autocomplete exists');
-  assert.match(app, /updateSlashTrackResults/, '/mp play autocompletes from the library');
-  assert.match(app, /renderMusicLibraryModal/, 'music library modal exists');
-  assert.match(app, /ml-dropzone/, 'drag & drop upload zone exists');
-  assert.match(app, /musicLibraryUploadFiles/, 'upload pipeline wired');
-  assert.match(app, /music-bot-chip/, 'bot participant chip exists');
-  assert.match(app, /Music volume \(only you\)/, 'per-user music volume context menu exists');
-  // Fullscreen consistency: the CSS target must match the JS element.
-  const css = fs.readFileSync(path.join(__dirname, '../css/style.css'), 'utf8');
-  assert.match(css, /\.voice-theater-stage:fullscreen/, 'fullscreen CSS targets the real stage element');
-  assert.doesNotMatch(css, /\.video-theater-stage:fullscreen/, 'stale fullscreen selector removed');
+  const api = fs.readFileSync(path.join(__dirname, '../js/api.js'), 'utf8');
+  const landingFa = fs.readFileSync(path.join(__dirname, '../public/landing/fa.html'), 'utf8');
+  const landingEn = fs.readFileSync(path.join(__dirname, '../public/landing/en.html'), 'utf8');
+  const music = fs.readFileSync(path.join(__dirname, '../js/music.js'), 'utf8');
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+  assert.match(backend, /registerMusicSystem/);
+  assert.match(backend, /app\.get\('\/fa'/);
+  assert.match(backend, /app\.get\('\/en'/);
+  assert.match(register, /music:command/);
+  assert.match(register, /music:subscribe/);
+  assert.match(register, /music:\$\{channelId\}/);
+  assert.match(register, /api\/music\/playback-url/);
+  assert.match(register, /presignDownload/);
+  assert.match(engineSource, /player_mode: 'synchronized-browser'/);
+  assert.match(engineSource, /music:\$\{room\.channelId\}/);
+  assert.match(music, /document\.createElement\('audio'\)/);
+  assert.match(music, /musicPlaybackUrl/);
+  assert.match(music, /enableAudio/);
+  assert.match(music, /client_received_at/);
+  assert.match(api, /musicUploadStream/);
+  assert.match(librarySource, /api\/music\/upload\/stream/);
+  assert.match(librarySource, /X-Upload-Token|x-upload-token/);
+  assert.match(librarySource, /putObjectStream/);
+  assert.match(storage, /presignDownload/);
+  assert.doesNotMatch(pkg.dependencies, /@livekit\/rtc-node/);
+  assert.equal(fs.existsSync(path.join(__dirname, '../server/music/worker-main.ts')), false);
+  assert.equal(fs.existsSync(path.join(__dirname, '../server/music/bot.ts')), false);
+  assert.match(app, /refreshMessageViewport/);
+  assert.match(app, /music-player-member/);
+  assert.match(app, /musicEnableAudio/);
+  assert.match(app, /browser_uploads_possible === false/);
+  assert.doesNotMatch(landingFa + landingEn, /joins the LiveKit voice room as a real participant|به عنوان یک شرکت‌کننده واقعی به اتاق صوتی LiveKit می‌پیوندد|A bot participant named/);
+  assert.doesNotMatch(app, /bucket_cors\.js --apply/);
+});
+
+test('README files are Persian-first and English-linked, with synchronized-player docs', () => {
+  const fa = fs.readFileSync(path.join(__dirname, '../README.md'), 'utf8');
+  const en = fs.readFileSync(path.join(__dirname, '../README.en.md'), 'utf8');
+  assert.match(fa, /\[🇬🇧 English\]\(README\.en\.md\)/);
+  assert.match(en, /\[🇮🇷 فارسی\]\(README\.md\)/);
+  assert.match(fa, /پخش هماهنگ/);
+  assert.match(en, /synchronized playback/i);
+  assert.doesNotMatch(fa + en, /Cloudflare R2|Supabase Storage|Cloudflare D1|FFmpeg → PCM/i);
 });

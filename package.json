@@ -1,7 +1,7 @@
 {
   "name": "mahyar-gap",
   "version": "3.0.0",
-  "description": "Mahyar Gap — real-time communication platform with channels, direct messages, LiveKit voice/video/screen sharing, per-user volume, presence, Socket.IO, Prisma & PostgreSQL",
+  "description": "Mahyar Gap — real-time communication platform with synchronized browser music, channels, direct messages, LiveKit voice/video/screen sharing, Socket.IO, Prisma & PostgreSQL",
   "main": "dist/server/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only server/index.ts",
@@ -16,7 +16,6 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",
     "@aws-sdk/s3-request-presigner": "^3.1161.0",
-    "@livekit/rtc-node": "^1.2.1",
     "@prisma/client": "^5.19.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.4",

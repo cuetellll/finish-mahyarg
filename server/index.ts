@@ -972,15 +972,14 @@ app.post('/api/dm/call-token', auth, async (req: AuthedRequest, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// Mahyar Music — real Discord-style music bot over LiveKit.
+// Mahyar Music — synchronized browser player (LiveKit is reserved for human voice/video).
 // Registered before socket middleware so its handlers attach on every connection.
 // ---------------------------------------------------------------------------
 const musicSystem = registerMusicSystem({
   app, io, prisma, auth,
   canAccessChannel,
   serverPermission,
-  requireServerPermission,
-  liveKit: liveKitClientConfig()
+  requireServerPermission
 });
 
 io.use((socket, next) => {
@@ -1108,7 +1107,7 @@ app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
 const PORT = Number(process.env.PORT) || 3000;
 server.listen(PORT, '0.0.0.0', () => console.log(`[Mahyar Gap] listening on 0.0.0.0:${PORT}`));
 
-// Graceful shutdown: release music bots (LiveKit connections + ffmpeg) first.
+// Graceful shutdown: stop the synchronized music timeline and its timers.
 async function shutdownGracefully(signal: string) {
   console.log(`[Mahyar Gap] ${signal} received; shutting down`);
   try { await musicSystem.shutdown(); } catch (error) { console.error('Music shutdown failed:', error); }
