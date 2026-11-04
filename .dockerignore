@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+*.log
+.env
+.env.*
+!.env.example
+README.md
+MAHYAR_GAP_REPORT_FA.md
+AUDIT_REPORT_FA.md
+IMPLEMENTATION_REPORT.md
+LIVEKIT_FIX_REPORT_FA.md
+QA_CSP_TAILWIND_REPORT.md

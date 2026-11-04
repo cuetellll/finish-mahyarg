@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>مهیار گپ — دوستانت. فضای خودت. موسیقی شما.</title>
+  <meta name="description" content="مهیار گپ یک فضای خصوصی برای جمع دوستان است: چت لحظه‌ای، اتاق صوتی، تماس تصویری، اشتراک صفحه و ربات موسیقی واقعی Mahyar Music." />
+  <meta name="theme-color" content="#07070C" />
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="/landing/landing.css" />
+</head>
+<body>
+
+  <!-- Animated ambient background: amber, purple and cyan light layers -->
+  <div class="ambient" aria-hidden="true">
+    <div class="ambient-mesh"></div>
+    <div class="ambient-grid"></div>
+    <span class="blob blob-amber"></span>
+    <span class="blob blob-purple"></span>
+    <span class="blob blob-cyan"></span>
+  </div>
+
+  <!-- ================= Navigation ================= -->
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="/fa" aria-label="مهیار گپ — خانه">
+        <span class="brand-badge">MG</span>
+        <span>مهیار <strong>گپ</strong></span>
+      </a>
+      <nav class="nav-links" aria-label="ناوبری اصلی">
+        <a href="#chat">پیام‌رسانی</a>
+        <a href="#voice">اتاق صوتی</a>
+        <a href="#video">تصویر و اشتراک صفحه</a>
+        <a href="#music">موسیقی</a>
+        <a href="#faq">سوالات</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="lang-switch" href="/en" lang="en" hreflang="en" title="Switch to English"><i class="fa-solid fa-globe"></i> English</a>
+        <a class="btn btn-ghost btn-sm" href="/app">ورود</a>
+        <a class="btn btn-accent btn-sm" href="/app">شروع کنید</a>
+        <button class="nav-burger" id="nav-burger" aria-label="باز کردن منو" aria-expanded="false"><i class="fa-solid fa-bars"></i></button>
+      </div>
+    </div>
+    <nav class="mobile-menu" id="mobile-menu" aria-label="منوی موبایل">
+      <a href="#chat">پیام‌رسانی</a>
+      <a href="#voice">اتاق صوتی</a>
+      <a href="#video">تصویر و اشتراک صفحه</a>
+      <a href="#music">موسیقی</a>
+      <a href="#faq">سوالات</a>
+      <a href="/en" lang="en">English</a>
+      <a href="/app">ورود</a>
+      <a href="/app"><strong>شروع کنید</strong></a>
+    </nav>
+  </header>
+
+  <!-- ================= Hero ================= -->
+  <section class="hero" id="home">
+    <!-- Floating icons: gentle pointer parallax, pure transform animation -->
+    <div class="float-icons" aria-hidden="true">
+      <span class="float-icon tone-amber" style="--x:2%;--y:12%;--size:54px;--depth:26;--dur:9s" data-depth="26"><i class="fa-solid fa-music"></i></span>
+      <span class="float-icon tone-purple" style="--x:90%;--y:5%;--size:44px;--depth:18;--dur:11s;--d:-2s" data-depth="18"><i class="fa-solid fa-headphones"></i></span>
+      <span class="float-icon tone-cyan" style="--x:3%;--y:66%;--size:40px;--depth:12;--dur:10s;--d:-4s" data-depth="12"><i class="fa-solid fa-microphone"></i></span>
+      <span class="float-icon tone-teal" style="--x:47%;--y:91%;--size:42px;--depth:20;--dur:12s;--d:-1s" data-depth="20"><i class="fa-solid fa-comments"></i></span>
+      <span class="float-icon tone-amber" style="--x:31%;--y:2%;--size:36px;--depth:10;--dur:8s;--d:-3s;--alpha:.45" data-depth="10"><i class="fa-solid fa-wave-square"></i></span>
+      <span class="float-icon tone-purple" style="--x:72%;--y:93%;--size:40px;--depth:15;--dur:13s;--d:-5s;--alpha:.5" data-depth="15"><i class="fa-solid fa-compact-disc"></i></span>
+    </div>
+
+    <div class="container hero-inner">
+      <div class="hero-copy">
+        <span class="hero-eyebrow"><i class="fa-solid fa-lock"></i> فضای خصوصی، فقط برای دوستان شما</span>
+        <h1>دوستانت. فضای خودت.<br /><span class="grad-orange">موسیقی شما.</span></h1>
+        <p class="sub">با هم چت کنید، حرف بزنید، صفحه‌تان را به اشتراک بگذارید و موسیقی مشترک گوش کنید — همه در یک فضای خصوصی، سبک و سریع.</p>
+        <div class="hero-cta">
+          <a class="btn btn-accent" href="/app"><i class="fa-solid fa-rocket"></i> شروع کنید</a>
+          <a class="btn btn-ghost" href="/app">ورود</a>
+        </div>
+        <div class="hero-meta">
+          <span><i class="fa-solid fa-bolt"></i> پیام لحظه‌ای</span>
+          <span><i class="fa-solid fa-headphones"></i> اتاق صوتی LiveKit</span>
+          <span class="meta-music"><i class="fa-solid fa-music"></i> ربات موسیقی واقعی</span>
+          <span><i class="fa-solid fa-feather"></i> سبک برای Railway</span>
+        </div>
+      </div>
+
+      <!-- Product preview: the real Mahyar Gap layout, built with CSS only -->
+      <div class="app-preview" aria-hidden="true">
+        <div class="ap-rail">
+          <span class="dot active"></span><span class="dot"></span><span class="dot"></span>
+        </div>
+        <div class="ap-side">
+          <div class="ap-title">سرور دوستان</div>
+          <div class="row on"><i class="fa-solid fa-hashtag"></i> گپ عمومی</div>
+          <div class="row"><i class="fa-solid fa-hashtag"></i> برنامه هفته</div>
+          <div class="row voice-row"><i class="fa-solid fa-volume-high"></i> اتاق صوتی ۱</div>
+          <div class="voice-members">
+            <span><i class="fa-solid fa-user"></i> مهیار</span>
+            <span><i class="fa-solid fa-user"></i> علی</span>
+            <span class="bot"><i class="fa-solid fa-music"></i> Mahyar Music</span>
+          </div>
+          <div class="row voice-row"><i class="fa-solid fa-volume-high"></i> اتاق بازی</div>
+        </div>
+        <div class="ap-main">
+          <div class="ap-chat-head"><i class="fa-solid fa-hashtag"></i> گپ عمومی <span class="live"><i class="fa-solid fa-circle"></i> متصل</span></div>
+          <div class="ap-chat">
+            <div class="ap-msg">
+              <span class="ava" style="background:linear-gradient(135deg,#7C5CFF,#22D3EE)"></span>
+              <div class="bubble"><b>مهیار <span class="time">۱۲:۰۴</span></b> امشب استریم مسابقه رو می‌بینیم؟</div>
+            </div>
+            <div class="ap-msg">
+              <span class="ava" style="background:linear-gradient(135deg,#F0B232,#FF8A3D)"></span>
+              <div class="bubble"><b>علی <span class="time">۱۲:۰۵</span></b> حتماً! یه آهنگ هم بذار برای انتظار 😄</div>
+            </div>
+            <div class="ap-msg">
+              <span class="ava" style="background:linear-gradient(135deg,#23A55A,#0E8A45)"></span>
+              <div class="bubble"><b>سارا <span class="time">۱۲:۰۶</span></b> /mp play آهنگ خوب بذار 🎧</div>
+            </div>
+          </div>
+          <div class="ap-voice-strip">
+            <span class="vp">م</span><span class="vp muted">ع</span>
+            <span class="label">اتاق صوتی ۱ • ۲ نفر</span>
+            <span class="bars"><span></span><span></span><span></span></span>
+          </div>
+          <div class="ap-musicbar">
+            <span class="cover"><i class="fa-solid fa-music"></i></span>
+            <span><span class="t">Believer</span><br /><span class="a">Mahyar Music • پخش برای همه</span></span>
+            <span class="wave"><span></span><span></span><span></span><span></span><span></span></span>
+          </div>
+          <div class="ap-composer"><i class="fa-solid fa-plus"></i><span class="slash-cmd">/mp</span><span>پیام به گپ عمومی…</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Messaging ================= -->
+  <section class="section" id="chat">
+    <div class="container">
+      <div class="section-head">
+        <div class="kicker">پیام‌رسانی</div>
+        <h2>گفت‌وگویی که لحظه‌ای می‌رسد</h2>
+        <p>کانال‌های متنی، پیام خصوصی، پاسخ، ری‌اکشن و جست‌وجو — با تحویل زنده و بدون نیاز به رفرش.</p>
+      </div>
+
+      <div class="showcase">
+        <div class="showcase-copy">
+          <h3>تایپ کنید، هیچ‌چیز پرش نمی‌کند</h3>
+          <p>پیام‌های جدید بدون بازسازی صفحه اضافه می‌شوند؛ کادر نوشتن همیشه سر جایش می‌ماند. نه فوکوس را از دست می‌دهید، نه متن نیمه‌کاره‌تان را.</p>
+          <ul class="showcase-list">
+            <li><i class="fa-solid fa-check"></i> کادر پیام پایدار — تمرکز، مکان‌نما و متن پیش‌نویس حفظ می‌شود</li>
+            <li><i class="fa-solid fa-check"></i> پاسخ، ری‌اکشن، پین و جست‌وجوی داخل پیام‌ها</li>
+            <li><i class="fa-solid fa-check"></i> پیام‌های خصوصی و گروهی در همان فضا</li>
+          </ul>
+        </div>
+        <div class="showcase-visual" aria-hidden="true">
+          <div class="sv-title"><i class="fa-solid fa-hashtag"></i> گپ عمومی</div>
+          <div class="ap-msg">
+            <span class="ava" style="background:linear-gradient(135deg,#7C5CFF,#22D3EE)"></span>
+            <div class="bubble"><b>مهیار <span class="time">۱۲:۱۲</span></b> فایل رو فرستادم، چک کن.</div>
+          </div>
+          <div class="ap-msg">
+            <span class="ava" style="background:linear-gradient(135deg,#FF8A3D,#FF6A2A)"></span>
+            <div class="bubble"><b>علی <span class="time">۱۲:۱۲</span></b> دیدم، عالیه 👌</div>
+          </div>
+          <div class="ap-msg">
+            <span class="ava" style="background:linear-gradient(135deg,#23A55A,#0E8A45)"></span>
+            <div class="bubble"><b>سارا <span class="time">۱۲:۱۳</span></b> بریم اتاق صوتی؟</div>
+          </div>
+          <div class="sv-composer"><span class="slash-cmd">#</span><span>پیام به گپ عمومی</span><span class="caret"></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Voice ================= -->
+  <section class="section" id="voice">
+    <div class="container">
+      <div class="section-head">
+        <div class="kicker">اتاق‌های صوتی</div>
+        <h2>یک کلیک، و همه با هم هستید</h2>
+        <p>اتاق صوتی روی LiveKit؛ بدون نصب، بدون تنظیمات پیچیده. کارت هر نفر جمع‌وجور است و گفت‌وگوی متنی هم کنارش باز می‌ماند.</p>
+      </div>
+
+      <div class="showcase flip">
+        <div class="showcase-copy">
+          <h3>اتاق صوتی جمع‌وجور، نه یک مستطیل خالی</h3>
+          <p>وقتی دوربین روشن نیست، هر نفر یک کارت کوچک و متعادل دارد. وقتی کسی حرف می‌زند، حلقه سبز دور کارتش روشن می‌شود. وقتی وارد اتاق می‌شوید و در حال چت هستید، یک نوار صوتی فشرده بالای پیام‌ها ظاهر می‌شود.</p>
+          <ul class="showcase-list">
+            <li><i class="fa-solid fa-check"></i> کارت‌های متعادل برای ۱ تا ۵ نفر</li>
+            <li><i class="fa-solid fa-check"></i> نشانگر صحبت، میکروفون و قطع صدا</li>
+            <li><i class="fa-solid fa-check"></i> نوار صوتی فشرده که هرگز کادر پیام را نمی‌پوشاند</li>
+            <li><i class="fa-solid fa-check"></i> حالت تمام‌صفحه پایدار با کلید Esc</li>
+          </ul>
+        </div>
+        <div class="showcase-visual" aria-hidden="true">
+          <div class="sv-title"><i class="fa-solid fa-headphones"></i> اتاق صوتی ۱ • ۴ نفر</div>
+          <div class="sv-voice-grid">
+            <div class="sv-tile is-speaking">
+              <span class="round" style="background:linear-gradient(135deg,#7C5CFF,#22D3EE)">م</span>
+              <span class="name">مهیار</span>
+            </div>
+            <div class="sv-tile">
+              <span class="round" style="background:linear-gradient(135deg,#FF8A3D,#FF6A2A)">ع</span>
+              <span class="name">علی</span>
+              <i class="fa-solid fa-microphone-slash mic"></i>
+            </div>
+            <div class="sv-tile">
+              <span class="round" style="background:linear-gradient(135deg,#23A55A,#0E8A45)">س</span>
+              <span class="name">سارا</span>
+            </div>
+            <div class="sv-tile">
+              <span class="round" style="background:linear-gradient(135deg,#C9B6FF,#7C5CFF)">ر</span>
+              <span class="name">رضا</span>
+            </div>
+          </div>
+          <div class="sv-composer"><i class="fa-solid fa-microphone" style="color:#3FD08A"></i><span>اتاق صوتی متصل است</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Video & Screen ================= -->
+  <section class="section" id="video">
+    <div class="container">
+      <div class="section-head">
+        <div class="kicker">تصویر و اشتراک صفحه</div>
+        <h2>دوربین یا صفحه — همان لحظه، برای همه</h2>
+        <p>وقتی دوربین یا اشتراک صفحه شروع می‌شود، اتاق صوتی به چیدمان ویدیویی تبدیل می‌شود: تصویر واقعی، نسبت تصویر درست، و کنترل تمام‌صفحه.</p>
+      </div>
+
+      <div class="showcase">
+        <div class="showcase-copy">
+          <h3>اشتراک صفحه در جایگاه اصلی</h3>
+          <p>صفحه‌ی در حال اشتراک بزرگ و در مرکز است، بقیه به صورت تصویرهای کوچک کنارش می‌آیند. نام شخصی که در حال اشتراک است همیشه دیده می‌شود.</p>
+          <ul class="showcase-list">
+            <li><i class="fa-solid fa-check"></i> چیدمان اختصاصی برای اشتراک صفحه</li>
+            <li><i class="fa-solid fa-check"></i> تصویرهای کوچک شرکت‌کنندگان بدون فضای خالی</li>
+            <li><i class="fa-solid fa-check"></i> تمام‌صفحه با یک دکمه و خروج با Esc</li>
+            <li><i class="fa-solid fa-check"></i> خطای دوربین، صدا و اتصال را قطع نمی‌کند</li>
+          </ul>
+        </div>
+        <div class="showcase-visual" aria-hidden="true">
+          <div class="sv-screen">
+            <span class="sv-badge"><i class="fa-solid fa-desktop"></i> سارا در حال اشتراک است</span>
+            <div class="desk"><span></span><span></span><span></span></div>
+            <div class="pip"></div>
+          </div>
+          <div class="sv-composer"><i class="fa-solid fa-video" style="color:#7FE8F7"></i><span>دوربین روشن • اشتراک صفحه فعال</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Music ================= -->
+  <section class="section" id="music">
+    <div class="container">
+      <div class="section-head">
+        <div class="kicker">ماهیار میوزیک</div>
+        <h2>یک ربات موسیقی واقعی در اتاق شما</h2>
+        <p>مثل یک شرکت‌کننده واقعی وارد اتاق صوتی می‌شود و آهنگ را برای همه پخش می‌کند. هر نفر ولوم خودش را دارد.</p>
+      </div>
+
+      <div class="music-spot">
+        <div>
+          <h3><span class="bot-dot"><i class="fa-solid fa-music"></i></span> Mahyar Music</h3>
+          <p>کتابخانهٔ مشترک موسیقی شما منبع اصلی پخش است: فایل‌های خودتان را در فضای خصوصی بارگذاری می‌کنید، با <b>/mp play</b> جست‌وجو می‌کنید و آهنگ را برای همه در اتاق پخش می‌کنید.</p>
+          <ul>
+            <li><i class="fa-solid fa-check"></i> ربات با نام <b>Mahyar Music</b> در لیست اعضای اتاق صوتی</li>
+            <li><i class="fa-solid fa-check"></i> کتابخانهٔ مشترک با بارگذاری مستقیم فایل صوتی</li>
+            <li><i class="fa-solid fa-check"></i> صف مشترک، pause/resume، skip و stop</li>
+            <li><i class="fa-solid fa-check"></i> ولوم و بی‌صدا کردن مستقل برای هر شنونده</li>
+            <li><i class="fa-solid fa-check"></i> بدون اسپاتیفای، ساندکلاد یا یوتیوب — فقط فایل‌های مجاز خودتان</li>
+          </ul>
+        </div>
+        <div class="code-hint" aria-hidden="true">
+          <div class="rowline"><span class="prompt">›</span> /mp play <span class="k">believer</span></div>
+          <div class="rowline"><span class="prompt">›</span> /mp queue</div>
+          <div class="rowline"><span class="prompt">›</span> /mp nowplaying</div>
+          <div class="rowline"><span class="prompt">›</span> /mp skip</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FAQ ================= -->
+  <section class="section" id="faq">
+    <div class="container">
+      <div class="section-head">
+        <div class="kicker">سوالات متداول</div>
+        <h2>چیزهایی که احتمالاً می‌پرسید</h2>
+      </div>
+      <div class="faq-list">
+        <details class="faq-item">
+          <summary>مهیار گپ برای چه کسانی ساخته شده؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">برای جمع‌های کوچک و خصوصی — گروهی از دوستان که می‌خواهند فضای مخصوص خودشان را داشته باشند؛ سبک، سریع و بدون تبلیغ.</div>
+        </details>
+        <details class="faq-item">
+          <summary>ربات موسیقی چطور کار می‌کند؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">«Mahyar Music» به‌عنوان یک شرکت‌کننده واقعی به اتاق صوتی LiveKit می‌پیوندد و همان مسیر صوتی را برای همه پخش می‌کند. هر کاربر به‌صورت محلی ولوم خودش را تنظیم یا موسیقی را برای خودش بی‌صدا می‌کند.</div>
+        </details>
+        <details class="faq-item">
+          <summary>موسیقی از کجا می‌آید؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">فقط از کتابخانهٔ مشترک همان سرور؛ فایل‌هایی که اعضا خودشان بارگذاری می‌کنند. مهیار گپ اسپاتیفای، ساندکلاد یا یوتیوب را استخراج یا پخش نمی‌کند و محتوای غیرمجاز پخش نمی‌شود.</div>
+        </details>
+        <details class="faq-item">
+          <summary>حساب کاربری چگونه ساخته می‌شود؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">روی «شروع کنید» بزنید، یک نام کاربری و ایمیل انتخاب کنید و وارد شوید. برای پیوستن به سرور دوستانتان، لینک دعوت را باز کنید.</div>
+        </details>
+        <details class="faq-item">
+          <summary>روی موبایل هم کار می‌کند؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">بله؛ این صفحه و خود برنامه برای موبایل، تبلت و دسکتاپ واکنش‌گرا هستند. در موبایل افکت حرکت آیکون‌ها با موس غیرفعال می‌شود تا منابع کمتری مصرف شود.</div>
+        </details>
+        <details class="faq-item">
+          <summary>چرا دوربین باز نمی‌شود؟ <i class="fa-solid fa-plus"></i></summary>
+          <div class="faq-body">معمولاً یا مجوز دوربین داده نشده، یا برنامهٔ دیگری از دوربین استفاده می‌کند. پیام خطا دقیقاً همان مورد را می‌گوید؛ میکروفون و اتصال صوتی شما در هر صورت سالم می‌ماند.</div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CTA ================= -->
+  <section class="section">
+    <div class="container">
+      <div class="cta-band">
+        <h2>فضای خودتان را بسازید</h2>
+        <p>چند دقیقه بیشتر طول نمی‌کشد: حساب بسازید، دوستان را دعوت کنید و اولین آهنگ مشترک را پخش کنید.</p>
+        <div class="hero-cta">
+          <a class="btn btn-accent" href="/app">شروع کنید</a>
+          <a class="btn btn-ghost" href="/app">ورود به حساب</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Footer ================= -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <a class="brand" href="/fa"><span class="brand-badge">MG</span><span>مهیار <strong>گپ</strong></span></a>
+          <p class="about">فضای ارتباطی خصوصی برای جمع‌های کوچک: چت، صدا، تصویر و موسیقی مشترک.</p>
+        </div>
+        <div>
+          <h4>محصول</h4>
+          <div class="links">
+            <a href="#chat">پیام‌رسانی</a>
+            <a href="#voice">اتاق صوتی</a>
+            <a href="#music">موسیقی</a>
+            <a href="/app">ورود</a>
+          </div>
+        </div>
+        <div>
+          <h4>منابع</h4>
+          <div class="links">
+            <a href="#faq">سوالات متداول</a>
+            <a href="/fa/privacy.html">سیاست حفظ حریم خصوصی</a>
+            <a href="/fa/terms.html">شرایط استفاده</a>
+          </div>
+        </div>
+        <div>
+          <h4>زبان</h4>
+          <div class="links">
+            <a href="/fa" lang="fa">فارسی</a>
+            <a href="/en" lang="en">English</a>
+          </div>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© ۱۴۰۵ مهیار گپ — ساخته‌شده برای دوستان.</span>
+        <span lang="en" dir="ltr">Your Friends. Your Space. Your Music.</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/landing/landing.js" defer></script>
+</body>
+</html>
