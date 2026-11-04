@@ -1339,10 +1339,23 @@ class MahyarGapApp {
       }
       const init = await this.api.musicUploadInit(serverId, file);
       entry.progress = 1;
-      await this.api.musicUploadPut(init.upload_url, file, init.content_type, (pct) => {
+      this.updateUploadRowDom(entry);
+      const report = (pct) => {
         entry.progress = Math.max(1, pct);
         this.updateUploadRowDom(entry);
-      });
+      };
+      try {
+        await this.api.musicUploadPut(init.upload_url, file, init.content_type, report);
+      } catch (directError) {
+        // A browser-level network failure means the bucket never answered the CORS
+        // preflight (Railway has no CORS panel, so this is the normal case). A real
+        // storage answer — 413, 403, a checksum rejection — must surface unchanged.
+        if (directError?.code !== 'STORAGE_NETWORK_ERROR' || !init.relay_available) throw directError;
+        entry.relay = true;
+        entry.progress = 1;
+        this.updateUploadRowDom(entry);
+        await this.api.musicUploadStream(init.upload_token, file, init.content_type, report);
+      }
       entry.status = 'processing';
       this.renderMusicLibraryIfOpen();
       const complete = await this.api.musicUploadComplete(init.upload_token, {});
@@ -1353,7 +1366,8 @@ class MahyarGapApp {
       await this.refreshMusicLibraryData();
     } catch (error) {
       entry.status = 'error';
-      entry.error = error.message || 'The upload failed.';
+      entry.error = this.describeUploadError(error);
+      if (error?.code === 'STORAGE_NETWORK_ERROR') entry.error = await this.describeStorageFailure();
       this.showToast(`Upload failed for "${file.name}": ${entry.error}`, 'error');
     }
     this.renderMusicLibraryIfOpen();
@@ -1363,6 +1377,40 @@ class MahyarGapApp {
     }, entry.status === 'error' ? 8000 : 4000);
   }
 
+  /** Maps upload failures to the states the UI promises to show: file too large,
+   *  unsupported audio, storage unavailable, or a generic failure. */
+  describeUploadError(error) {
+    const message = error?.message || 'The upload failed.';
+    switch (error?.code) {
+      case 'FILE_TOO_LARGE': return `File too large — ${message}`;
+      case 'UNSUPPORTED_AUDIO': return `Unsupported audio — ${message}`;
+      case 'MUSIC_STORAGE_NOT_CONFIGURED': return `Storage unavailable — ${message}`;
+      case 'STORAGE_UNAVAILABLE': return `Storage unavailable — ${message}`;
+      case 'UPLOAD_SESSION_GONE':
+      case 'UPLOAD_SESSION_EXPIRED': return `The upload session expired before the file finished — ${message}`;
+      case 'NETWORK_ERROR': return 'The connection dropped before the file finished uploading.';
+      default: return message;
+    }
+  }
+
+  /** Turns an opaque browser network error into an actionable sentence by asking the
+   *  backend whether the bucket's CORS rules actually allow this origin to PUT. */
+  async describeStorageFailure() {
+    try {
+      const diag = await this.api.musicUploadDiagnostics();
+      if (diag?.storage_configured === false) {
+        return `Music storage is not configured on this deployment (${(diag.missing_variables || []).join(', ')}).`;
+      }
+      if (diag?.browser_uploads_possible === false) {
+        return `The bucket refused a browser upload from ${diag.request_origin} because it has no CORS rule for this origin. Add one with: node scripts/bucket_cors.js --apply ${diag.request_origin}`;
+      }
+      if (diag?.browser_uploads_possible === true) {
+        return 'The bucket CORS rules are correct, so the upload was blocked elsewhere — check the browser network tab (offline connection, proxy/VPN, or an expired upload URL).';
+      }
+    } catch (_) { /* diagnostics are best-effort only */ }
+    return 'The browser could not reach the storage bucket. The usual cause is a missing CORS rule on the bucket for this site — see the README section “Bucket CORS”.';
+  }
+
   /** Live progress bar update without a modal re-render (keeps typing focus stable). */
   updateUploadRowDom(entry) {
     const row = document.getElementById(`ml-up-${entry.id}`);
@@ -1370,7 +1418,7 @@ class MahyarGapApp {
     const fill = row.querySelector('.ml-up-fill');
     if (fill) fill.style.width = `${entry.progress}%`;
     const label = row.querySelector('.ml-up-pct');
-    if (label) label.textContent = `${entry.progress}%`;
+    if (label) label.textContent = entry.status === 'processing' ? 'Verifying…' : `${entry.relay ? 'Server ' : ''}${entry.progress}%`;
   }
 
   renderMusicLibraryIfOpen() {
@@ -1598,7 +1646,7 @@ class MahyarGapApp {
             <span class="ml-up-name" title="${this.escapeAttr(up.name)}">${this.escapeHtml(up.title || up.name)}</span>
             ${up.status === 'error' ? `<span class="ml-up-error">${this.escapeHtml(up.error || 'Failed')}</span>` : `
               <div class="ml-up-bar"><div class="ml-up-fill" style="width:${up.progress}%"></div></div>
-              <span class="ml-up-pct">${up.status === 'processing' ? 'Verifying…' : `${up.progress}%`}</span>
+              <span class="ml-up-pct">${up.status === 'processing' ? 'Verifying…' : `${up.relay ? 'Server ' : ''}${up.progress}%`}</span>
             `}
           </div>`).join('')}</div>` : ''}
         <div class="ml-list">

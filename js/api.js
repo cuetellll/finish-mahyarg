@@ -194,9 +194,56 @@ class MahyarAPI {
         try { const parsed = JSON.parse(xhr.responseText || '{}'); if (parsed?.Code === 'EntityTooLarge') message = 'The file is larger than the configured limit.'; } catch (_) {}
         reject(new Error(message));
       };
-      xhr.onerror = () => reject(new Error('Upload to storage failed: the network connection was interrupted.'));
+      xhr.onerror = () => {
+        // The browser refuses to expose *why* the request died, so the code is
+        // attached and the caller asks the server for a definitive CORS verdict.
+        const error = new Error('Upload to storage failed: the browser could not reach the bucket.');
+        error.code = 'STORAGE_NETWORK_ERROR';
+        reject(error);
+      };
       xhr.send(file);
     });
+  }
+
+  /** Same-origin relay: streams the file through this app server into the bucket.
+   *  Used when the browser cannot PUT to the bucket directly (no bucket CORS rule
+   *  for this origin), so uploads work without any bucket-side configuration. */
+  musicUploadStream(uploadToken, file, contentType, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/music/upload/stream?token=${encodeURIComponent(uploadToken)}`);
+      const authToken = this.token();
+      if (authToken) xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+      xhr.setRequestHeader('Content-Type', contentType || file.type || 'application/octet-stream');
+      xhr.upload.onprogress = (event) => { if (event.lengthComputable && typeof onProgress === 'function') onProgress(Math.round((event.loaded / event.total) * 100)); };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText || '{}'); } catch (_) { /* HTML error page */ }
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(body);
+        let code = body.code;
+        if (!code) code = xhr.status === 413 ? 'FILE_TOO_LARGE' : xhr.status === 415 ? 'UNSUPPORTED_AUDIO' : xhr.status >= 500 ? 'STORAGE_UNAVAILABLE' : 'UPLOAD_FAILED';
+        const error = new Error(body.error || `The server could not store the file (HTTP ${xhr.status}).`);
+        error.code = code;
+        error.status = xhr.status;
+        reject(error);
+      };
+      xhr.onerror = () => {
+        const error = new Error('The connection to the server dropped during the upload.');
+        error.code = 'NETWORK_ERROR';
+        reject(error);
+      };
+      xhr.onabort = () => {
+        const error = new Error('The upload was cancelled.');
+        error.code = 'UPLOAD_ABORTED';
+        reject(error);
+      };
+      xhr.send(file);
+    });
+  }
+
+  /** Server-side verdict on why a browser upload fails (bucket CORS for this origin). */
+  musicUploadDiagnostics() {
+    return this.request('/api/music/upload/diagnostics');
   }
 
   /** Tells the backend the bytes are in the bucket; it verifies and creates the library entry. */

@@ -28,7 +28,8 @@ import path from 'path';
 import type { PrismaClient, MusicTrack } from '@prisma/client';
 import {
   storageConfig, missingStorageVariables, musicObjectKey, presignUpload,
-  headObject, downloadToTempFile, removeTempFile, deleteObject, putLocalFile
+  headObject, downloadToTempFile, removeTempFile, deleteObject, putLocalFile,
+  getBucketCors, bucketCorsAllowsOrigin, uploadStreamToBucket
 } from './storage';
 
 type AuthedRequest = Request & { userId?: string };
@@ -315,6 +316,41 @@ export function registerMusicLibrary(deps: LibraryDeps): void {
     } catch (error) { return next(error); }
   });
 
+  // Diagnoses the (by far) most common upload failure: the browser aborts the
+  // presigned PUT because the bucket has no CORS rule for this site's origin.
+  // Read-only, authenticated, and it never returns keys or object contents.
+  app.get('/api/music/upload/diagnostics', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const config = storageConfig();
+      if (!config.ready) {
+        return res.json({
+          storage_configured: false,
+          missing_variables: missingStorageVariables(),
+          browser_uploads_possible: false
+        });
+      }
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+      const origin = String(req.headers.origin || `${forwardedProto}://${req.headers.host || ''}`).replace(/\/$/, '');
+      const cors = await getBucketCors();
+      const allowsOrigin = cors.configured && bucketCorsAllowsOrigin(cors.rules, origin);
+      return res.json({
+        storage_configured: true,
+        endpoint: config.endpoint,
+        url_style: config.forcePathStyle ? 'path' : 'virtual-hosted',
+        request_origin: origin,
+        cors: {
+          configured: cors.configured,
+          allows_origin: allowsOrigin,
+          rules: cors.rules,
+          error: cors.error
+        },
+        browser_uploads_possible: allowsOrigin,
+        hint: allowsOrigin ? null
+          : 'The bucket has no CORS rule allowing PUT from this origin, so the browser cannot upload directly. Run: node --env-file-if-exists=.env scripts/bucket_cors.js --apply ' + origin
+      });
+    } catch (error) { return next(error); }
+  });
+
   app.post('/api/music/upload/init', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
       const parsed = initSchema.safeParse(req.body);
@@ -368,11 +404,70 @@ export function registerMusicLibrary(deps: LibraryDeps): void {
         upload_token: token,
         key,
         content_type: format.mime,
+        // The same-origin relay is always available: if the browser cannot PUT
+        // to the bucket (no CORS rule), the client streams the file through this
+        // server instead and the upload still completes.
+        relay_available: true,
+        relay_url: '/api/music/upload/stream',
         expires_in_sec: 900,
         suggested_title: fallbackMeta.title,
         suggested_artist: fallbackMeta.artist
       });
     } catch (error) { return next(error); }
+  });
+
+  /**
+   * Same-origin relay for the browser upload.
+   *
+   * The browser POSTs the raw file here (no multipart envelope, no base64), the
+   * body is piped straight into a multipart upload on the bucket, and only one
+   * 8 MiB part is held in memory at a time. This is the fallback for a bucket that
+   * answers the CORS preflight without Access-Control-Allow-Origin — the common
+   * Railway case, since its CORS rules can only be written over the S3 API.
+   *
+   * It does not replace `/upload/complete`: after the bytes land, the client still
+   * calls that endpoint, which verifies the object (HEAD, magic bytes, ffprobe),
+   * dedupes it and writes the MusicTrack row. Nothing is recorded here, so a
+   * failed or aborted relay leaves no catalog entry and no stored object.
+   */
+  app.post('/api/music/upload/stream', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const token = String(req.query.token || '').trim();
+      if (!token) return res.status(400).json({ error: 'An upload token is required.', code: 'MISSING_UPLOAD_TOKEN' });
+      const pending = pendingUploads.get(token);
+      if (!pending) return res.status(404).json({ error: 'This upload session expired or was already completed. Start the upload again.', code: 'UPLOAD_SESSION_GONE' });
+      if (pending.userId !== req.userId) return res.status(403).json({ error: 'Only the uploader can send this file.', code: 'NOT_UPLOADER' });
+      if (pending.expiresAt <= Date.now()) {
+        pendingUploads.delete(token);
+        return res.status(410).json({ error: 'The upload session expired. Start again.', code: 'UPLOAD_SESSION_EXPIRED' });
+      }
+      if (!storageConfig().ready) {
+        return res.status(501).json({
+          error: 'Music storage is not configured on this deployment; uploads are disabled.',
+          code: 'MUSIC_STORAGE_NOT_CONFIGURED',
+          missingVariables: missingStorageVariables()
+        });
+      }
+
+      const declared = Number(req.headers['content-length'] || 0);
+      if (!Number.isFinite(declared) || declared <= 0) {
+        return res.status(411).json({ error: 'The upload must declare its length.', code: 'LENGTH_REQUIRED' });
+      }
+      if (declared > MAX_FILE_BYTES) {
+        return res.status(413).json({ error: `Audio files are limited to ${Math.round(MAX_FILE_BYTES / (1024 * 1024))} MB.`, code: 'FILE_TOO_LARGE' });
+      }
+
+      const contentType = AUDIO_FORMATS[pending.extension]?.mime || 'application/octet-stream';
+      const result = await uploadStreamToBucket(pending.key, contentType, req, MAX_FILE_BYTES);
+      return res.status(201).json({ key: pending.key, size: result.size, upload_token: token, relay: true });
+    } catch (error: any) {
+      // A disconnected client cannot receive a response; that is not a server fault.
+      if (req.destroyed || res.headersSent) return undefined;
+      if (error?.code === 'TOO_LARGE') {
+        return res.status(413).json({ error: `Audio files are limited to ${Math.round(MAX_FILE_BYTES / (1024 * 1024))} MB.`, code: 'FILE_TOO_LARGE' });
+      }
+      return next(error);
+    }
   });
 
   app.post('/api/music/upload/complete', auth, async (req: AuthedRequest, res: Response, next: NextFunction) => {

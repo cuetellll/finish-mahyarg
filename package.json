@@ -9,6 +9,7 @@
     "start": "node dist/server/index.js",
     "db:migrate": "npx prisma migrate deploy",
     "db:generate": "npx prisma generate",
+    "bucket:cors": "node --env-file-if-exists=.env scripts/bucket_cors.js",
     "lint": "tsc --noEmit -p tsconfig.json",
     "test": "node --test"
   },

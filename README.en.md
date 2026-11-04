@@ -194,9 +194,40 @@ This section assumes no backend experience. Follow the order exactly.
 
 Music uploads use `presigned PUT`, so the browser writes to the bucket directly. That keeps application memory and bandwidth low.
 
-If the browser refuses a direct upload (a CORS or network error in the console), the bucket has no CORS rule for the app origin. Add one: origin `https://<your-app>.up.railway.app`, methods `PUT, GET, HEAD`, headers `*`, and expose `ETag`.
+Railway exposes no CORS panel or variable — the rules only exist on the S3 API of the bucket itself. Without a matching rule the browser drops the `OPTIONS` preflight, never sends the `PUT`, and all the UI can report is:
 
-> **Honest status:** Railway Bucket CORS behaviour has **not** been verified in this repository with real credentials. If direct upload fails in your environment, configure the CORS rule above; otherwise the fallback is streaming uploads through the application server, which raises application egress. This project deliberately does not claim that direct upload works without CORS configuration.
+```
+Upload to storage failed: the browser could not reach the bucket.
+```
+
+**Diagnose and fix** with the script in this repository (it reads the same variables the server does):
+
+```bash
+# 1) Inspect the current rules and whether the app origin may PUT
+npm run bucket:cors -- --check --origin https://<your-app>.up.railway.app
+
+# 2) Write the rule for the app origin (add localhost for development if needed)
+npm run bucket:cors -- --apply https://<your-app>.up.railway.app http://localhost:3000
+```
+
+On Railway, where there is no `.env` file, run the same script through the CLI:
+
+```bash
+railway run node scripts/bucket_cors.js --apply https://<your-app>.up.railway.app
+```
+
+The rule it writes: the given origins, methods `PUT, GET, HEAD`, headers `*`, `ETag` exposed, `MaxAgeSeconds=3000`. The app also exposes `GET /api/music/upload/diagnostics`, which reports whether a rule exists and whether the current origin may upload — that answer is what turns the opaque browser failure into a precise error message in the UI.
+
+### When the bucket refuses direct uploads (the fallback is live)
+
+Uploads work before any CORS configuration: if the browser's direct `PUT` to the bucket fails (network/CORS error), the same file is sent, without any user action, to the same-origin endpoint `POST /api/music/upload/stream`, which relays it into the bucket as a multipart upload.
+
+- The body is never buffered whole: one 8 MiB part of the incoming stream is in memory at a time (concurrency 1).
+- The size limit is enforced on `Content-Length` and again on the actual bytes; exceeding it aborts the multipart upload so no half-written object is left behind.
+- Authentication, server membership and the upload permission still come from `init` (via `upload_token`); content verification (HEAD + magic bytes + ffprobe), duplicate detection and the `MusicTrack` insert still come from `complete` — an interrupted relay creates no catalog row.
+- Cost: this path uses **application service egress**, unlike direct uploads. That is why direct uploads stay the preferred path and become active automatically once a CORS rule exists on the bucket.
+
+> **Honest status:** configuring CORS on a real Railway bucket has **not** been verified in this repository (no real credentials were available); the code and script follow the standard `PutBucketCORS` behaviour. The relay path has only been exercised locally against a stub S3 (part sizing, size cap, abort), not against the real Railway bucket.
 
 ---
 

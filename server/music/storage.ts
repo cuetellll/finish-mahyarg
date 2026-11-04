@@ -55,7 +55,13 @@ export function storageConfig(): StorageConfig {
   // Railway shows the URL style in the Credentials tab. Virtual-hosted is the
   // default; only switch to path-style when the bucket credentials say so.
   const rawStyle = process.env.AWS_S3_URL_STYLE?.trim().toLowerCase() || 'virtual-hosted';
-  const forcePathStyle = rawStyle.startsWith('path');
+  // Railway hands out a per-bucket endpoint like https://<bucket>.t3.storageapi.dev.
+  // Signing that as virtual-hosted would produce <bucket>.<bucket>.t3.storageapi.dev,
+  // a host that does not exist, so the presence of the bucket name in the endpoint
+  // host is itself proof that path-style addressing is the correct one.
+  const endpointHost = (() => { try { return new URL(endpoint).hostname.toLowerCase(); } catch { return ''; } })();
+  const bucketNamesEndpoint = Boolean(bucket) && endpointHost.startsWith(`${bucket.toLowerCase()}.`);
+  const forcePathStyle = rawStyle.startsWith('path') || bucketNamesEndpoint;
   const ready = Boolean(endpoint && bucket && accessKeyId && secretAccessKey);
   return { endpoint, region, bucket, accessKeyId, secretAccessKey, forcePathStyle, ready };
 }
@@ -84,7 +90,14 @@ async function client(): Promise<S3Client> {
     region: config.region,
     endpoint: config.endpoint,
     forcePathStyle: config.forcePathStyle,
-    credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }
+    credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    // The AWS SDK >=3.729 adds a CRC32 checksum to every PutObject, which for a
+    // presigned URL lands in the query string (x-amz-checksum-crc32=AAAAAA==).
+    // Browsers cannot satisfy it, so the bucket rejects the PUT with a signature/
+    // digest error long before any byte matters. Integrity is still verified
+    // server-side after the upload (HEAD size + magic bytes + ffprobe).
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED'
   });
   cachedClient = { client: s3, key: cacheKey };
   return s3;
@@ -192,6 +205,97 @@ export async function putObjectStream(
   }));
 }
 
+/** Part size for the relay upload: S3 requires >=5 MiB per non-final part. */
+const RELAY_PART_BYTES = 8 * 1024 * 1024;
+
+export interface StreamUploadResult {
+  size: number;
+  etag: string;
+}
+
+/**
+ * Relay upload: streams an incoming request body into the bucket through this
+ * process, with bounded memory (one 8 MiB part at a time, concurrency 1) and a
+ * hard byte cap.
+ *
+ * This exists because a browser can only PUT directly when the bucket answers the
+ * CORS preflight for the app origin. Railway has no dashboard switch for that, so
+ * until a CORS rule is written the bytes take this same-origin path instead. It
+ * costs application egress, which is why the direct path is still preferred and
+ * used automatically whenever the bucket allows it.
+ */
+export async function uploadStreamToBucket(
+  key: string,
+  contentType: string,
+  body: import('stream').Readable,
+  maxBytes: number
+): Promise<StreamUploadResult> {
+  const {
+    CreateMultipartUploadCommand, UploadPartCommand,
+    CompleteMultipartUploadCommand, AbortMultipartUploadCommand
+  } = await import('@aws-sdk/client-s3');
+  const config = storageConfig();
+  const s3 = await client();
+
+  const created = await s3.send(new CreateMultipartUploadCommand({
+    Bucket: config.bucket,
+    Key: key,
+    ContentType: contentType
+  }));
+  const uploadId = created.UploadId;
+  if (!uploadId) throw new Error('The bucket did not start a multipart upload.');
+
+  const parts: { ETag: string; PartNumber: number }[] = [];
+  let buffered: Buffer[] = [];
+  let bufferedBytes = 0;
+  let total = 0;
+  let partNumber = 1;
+
+  const flush = async (): Promise<void> => {
+    if (bufferedBytes === 0) return;
+    const payload = Buffer.concat(buffered, bufferedBytes);
+    buffered = [];
+    bufferedBytes = 0;
+    const out = await s3.send(new UploadPartCommand({
+      Bucket: config.bucket,
+      Key: key,
+      UploadId: uploadId,
+      PartNumber: partNumber,
+      Body: payload,
+      ContentLength: payload.length
+    }));
+    if (!out.ETag) throw new Error('The bucket did not return an ETag for an uploaded part.');
+    parts.push({ ETag: out.ETag, PartNumber: partNumber });
+    partNumber += 1;
+  };
+
+  try {
+    for await (const chunk of body as AsyncIterable<Buffer>) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as any);
+      total += buffer.length;
+      if (total > maxBytes) {
+        throw Object.assign(new Error('The uploaded file exceeds the size limit.'), { code: 'TOO_LARGE' });
+      }
+      buffered.push(buffer);
+      bufferedBytes += buffer.length;
+      if (bufferedBytes >= RELAY_PART_BYTES) await flush();
+    }
+    await flush();
+    if (total === 0) throw Object.assign(new Error('The upload contained no data.'), { code: 'EMPTY' });
+    const done = await s3.send(new CompleteMultipartUploadCommand({
+      Bucket: config.bucket,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: { Parts: parts }
+    }));
+    return { size: total, etag: String(done.ETag || '').replace(/"/g, '') };
+  } catch (error) {
+    // Nothing half-written survives: aborting discards every uploaded part.
+    await s3.send(new AbortMultipartUploadCommand({ Bucket: config.bucket, Key: key, UploadId: uploadId })).catch(() => undefined);
+    throw error;
+  }
+}
+
 /**
  * Downloads an object to a temp file for server-side verification
  * (signature check + ffprobe). The file is streamed to disk — the audio
@@ -239,4 +343,103 @@ export async function putLocalFile(key: string, filePath: string, contentType: s
 
 export async function removeTempFile(filePath: string): Promise<void> {
   await unlink(filePath).catch(() => undefined);
+}
+
+// --------------------------------------------------------------- CORS on the bucket
+//
+// The browser PUTs audio straight into the bucket, so the bucket itself has to
+// answer the CORS preflight for the app origin. Railway exposes no dashboard
+// toggle for this: the rules can only be read/written over the S3 API
+// (GetBucketCORS / PutBucketCORS). Without a matching rule the browser aborts
+// the PUT with a bare network error — this is the single most common cause of
+// "Upload to storage failed: the network connection was interrupted".
+
+export interface BucketCorsRule {
+  allowedOrigins: string[];
+  allowedMethods: string[];
+  allowedHeaders: string[];
+  exposeHeaders: string[];
+  maxAgeSeconds?: number;
+}
+
+export interface BucketCorsStatus {
+  configured: boolean;
+  rules: BucketCorsRule[];
+  error?: string;
+}
+
+/** Reads the bucket's CORS configuration. Never throws. */
+export async function getBucketCors(): Promise<BucketCorsStatus> {
+  const config = storageConfig();
+  if (!config.ready) return { configured: false, rules: [], error: 'Railway Bucket storage is not configured.' };
+  const { GetBucketCorsCommand } = await import('@aws-sdk/client-s3');
+  const s3 = await client();
+  try {
+    const out = await s3.send(new GetBucketCorsCommand({ Bucket: config.bucket }));
+    const rules: BucketCorsRule[] = (out.CORSRules || []).map((rule) => ({
+      allowedOrigins: rule.AllowedOrigins || [],
+      allowedMethods: (rule.AllowedMethods || []).map((method: string) => method.toUpperCase()),
+      allowedHeaders: rule.AllowedHeaders || [],
+      exposeHeaders: rule.ExposeHeaders || [],
+      maxAgeSeconds: rule.MaxAgeSeconds
+    }));
+    return { configured: rules.length > 0, rules };
+  } catch (error: any) {
+    const status = error?.$metadata?.httpStatusCode;
+    // S3 answers 404 / NoSuchCORSConfiguration when the bucket simply has no rules.
+    if (status === 404 || error?.name === 'NoSuchCORSConfiguration') return { configured: false, rules: [] };
+    return { configured: false, rules: [], error: error?.message || 'The bucket CORS configuration could not be read.' };
+  }
+}
+
+/** S3 CORS allows at most one `*` per origin pattern; `*` alone matches everything. */
+export function corsOriginMatches(pattern: string, origin: string): boolean {
+  const rule = pattern.trim().toLowerCase();
+  const target = origin.trim().toLowerCase();
+  if (!rule || !target) return false;
+  if (rule === '*') return true;
+  if (!rule.includes('*')) return rule === target;
+  const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`).test(target);
+}
+
+/** True when some rule allows a PUT from this browser origin. */
+export function bucketCorsAllowsOrigin(rules: BucketCorsRule[], origin: string): boolean {
+  return rules.some((rule) =>
+    rule.allowedMethods.includes('PUT') && rule.allowedOrigins.some((pattern) => corsOriginMatches(pattern, origin))
+  );
+}
+
+/**
+ * Replaces the bucket CORS configuration with one rule that enables browser
+ * uploads/reads for the given origins. Only `PUT/GET/HEAD` are allowed and
+ * `ETag` is exposed, which is all the uploader needs.
+ */
+export async function applyBucketCors(origins: string[]): Promise<BucketCorsRule[]> {
+  const config = storageConfig();
+  if (!config.ready) throw new Error('Railway Bucket storage is not configured.');
+  const clean = Array.from(new Set(origins.map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean)));
+  if (!clean.length) throw new Error('At least one origin is required.');
+  const rule: BucketCorsRule = {
+    allowedOrigins: clean,
+    allowedMethods: ['PUT', 'GET', 'HEAD'],
+    allowedHeaders: ['*'],
+    exposeHeaders: ['ETag'],
+    maxAgeSeconds: 3000
+  };
+  const { PutBucketCorsCommand } = await import('@aws-sdk/client-s3');
+  const s3 = await client();
+  await s3.send(new PutBucketCorsCommand({
+    Bucket: config.bucket,
+    CORSConfiguration: {
+      CORSRules: [{
+        AllowedOrigins: rule.allowedOrigins,
+        AllowedMethods: rule.allowedMethods,
+        AllowedHeaders: rule.allowedHeaders,
+        ExposeHeaders: rule.exposeHeaders,
+        MaxAgeSeconds: rule.maxAgeSeconds
+      }]
+    }
+  }));
+  return [rule];
 }
