@@ -11,9 +11,16 @@
  *  - onConnectionLost()  : worker died or LiveKit connection dropped
  *  - onDurationKnown(s)  : ffmpeg reported the real duration
  *  - onFatalError(msg)   : playback-level failure (engine advances the queue)
+ *
+ * Startup contract: a worker is "ready" (and `connected` returns true) ONLY
+ * after the child reported the full startup sequence — native runtime loaded,
+ * LiveKit room joined, AudioSource created, audio track published. Any failure
+ * before that is surfaced with exit code, signal and sanitized output tails,
+ * and a per-room circuit breaker stops the engine from respawning in a loop.
  */
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
+import { boundedTail, sanitizeText, tailSummary } from './diagnostics';
 
 export interface BotEvents {
   onTrackEnded: () => void;
@@ -24,6 +31,45 @@ export interface BotEvents {
 
 const READY_TIMEOUT_MS = 20_000;
 const HEARTBEAT_TIMEOUT_MS = 35_000;
+
+/**
+ * Circuit breaker (per voice room, shared across worker instances): if startup
+ * failed this many times inside the window, further ensureConnected() calls
+ * fail fast instead of spawning more doomed workers.
+ */
+const BREAKER_MAX_FAILURES = 3;
+const BREAKER_WINDOW_MS = 60_000;
+const BREAKER_COOLDOWN_MS = 30_000;
+const breakerFailures = new Map<string, number[]>(); // roomId → failure timestamps
+
+function breakerAllows(roomId: string): { ok: true } | { ok: false; message: string } {
+  const now = Date.now();
+  const recent = (breakerFailures.get(roomId) || []).filter((ts) => now - ts < BREAKER_WINDOW_MS + BREAKER_COOLDOWN_MS);
+  breakerFailures.set(roomId, recent);
+  const inWindow = recent.filter((ts) => now - ts < BREAKER_WINDOW_MS);
+  if (inWindow.length >= BREAKER_MAX_FAILURES) {
+    const lastAt = inWindow[inWindow.length - 1];
+    const waitSeconds = Math.max(1, Math.ceil((BREAKER_COOLDOWN_MS - (now - lastAt)) / 1000));
+    return {
+      ok: false,
+      message: `Music worker for this room failed to start ${inWindow.length} times in the last minute (last error at ${new Date(lastAt).toISOString()}). Retries are paused for ~${waitSeconds}s to protect the server — check the Railway Deploy Logs for the worker's step-by-step startup diagnostics before trying again.`
+    };
+  }
+  return { ok: true };
+}
+
+function breakerRecordFailure(roomId: string) {
+  const now = Date.now();
+  const recent = (breakerFailures.get(roomId) || []).filter((ts) => now - ts < BREAKER_WINDOW_MS + BREAKER_COOLDOWN_MS);
+  recent.push(now);
+  breakerFailures.set(roomId, recent);
+}
+
+function breakerRecordSuccess(roomId: string) {
+  breakerFailures.delete(roomId);
+}
+
+interface StreamTails { stdout: string; stderr: string }
 
 export class MusicBotWorker {
   readonly identity: string;
@@ -36,6 +82,7 @@ export class MusicBotWorker {
   private currentUrl: string | null = null;
   private currentOffset = 0;
   private playingFlag = false;
+  private lastStartupError: string | null = null;
   private events: BotEvents;
 
   constructor(
@@ -58,22 +105,40 @@ export class MusicBotWorker {
   get playing(): boolean { return this.playingFlag; }
   get currentStreamUrl(): string | null { return this.currentUrl; }
   get playbackOffset(): number { return this.currentOffset; }
+  /** Last actionable startup failure (breaker messages included). */
+  get startupError(): string | null { return this.lastStartupError; }
 
   private workerEntry(): string {
     // dist/server/music/worker-main.js sits next to this compiled file.
     return path.join(__dirname, 'worker-main.js');
   }
 
+  /** Secrets that must never leak through captured worker output. */
+  private secrets(): Array<string | undefined> {
+    return [this.apiKey, this.apiSecret, this.liveKitUrl];
+  }
+
   /** Spawn the worker and wait until it reports the room joined + track published. */
   async ensureConnected(): Promise<void> {
     if (this.connected) return;
     if (this.starting) return this.starting;
+
+    // Fail fast instead of spawning yet another doomed worker (FIX 4).
+    const breaker = breakerAllows(this.roomId);
+    if (!breaker.ok) {
+      this.lastStartupError = breaker.message;
+      console.warn(`[MahyarMusic] spawn blocked by startup breaker for room ${this.roomId}: ${breaker.message}`);
+      throw new Error(breaker.message);
+    }
+
     this.starting = (async () => {
       try {
         this.stopping = false;
         this.ready = false;
         this.playingFlag = false;
         this.humanCount = 0;
+        this.lastStartupError = null;
+
         const child = spawn(process.execPath, [this.workerEntry()], {
           env: {
             ...process.env,
@@ -83,22 +148,28 @@ export class MusicBotWorker {
         });
         this.child = child;
 
-        let stderrTail = '';
-        child.stderr?.on('data', (chunk: Buffer) => {
-          stderrTail = (stderrTail + chunk.toString()).slice(-4_000);
-        });
+        // Keep stdout and stderr tails SEPARATE (FIX 3): rtc-node logs to stdout,
+        // Node errors/warnings to stderr. Both are bounded and sanitized.
+        const tails: StreamTails = { stdout: '', stderr: '' };
         child.stdout?.on('data', (chunk: Buffer) => {
-          // rtc-node logs to stdout; keep the tail for startup-failure diagnostics.
-          stderrTail = (stderrTail + chunk.toString()).slice(-4_000);
+          tails.stdout = boundedTail(tails.stdout, chunk.toString());
+        });
+        child.stderr?.on('data', (chunk: Buffer) => {
+          tails.stderr = boundedTail(tails.stderr, chunk.toString());
         });
 
         child.on('message', (message: any) => this.handleWorkerMessage(message));
+
+        // Spawn/IPC failures (ENOENT, EAGAIN...) must reject the startup wait
+        // instead of hanging until the ready timeout.
+        let spawnError: Error | null = null;
         child.on('error', (error) => {
-          // Spawn/IPC failures (ENOENT, EAGAIN...) otherwise hang the startup wait silently.
-          console.error(`[MahyarMusic] worker spawn error for ${this.roomId}:`, error.message);
-          stderrTail = `${stderrTail}\nspawn-error: ${error.message}`.slice(-4_000);
+          spawnError = error;
+          console.error(`[MahyarMusic] worker spawn error for room ${this.roomId}: ${error.message}`);
         });
+
         console.log(`[MahyarMusic] worker spawned for room ${this.roomId} (pid ${child.pid})`);
+
         child.on('exit', (code, signal) => {
           const wasReady = this.ready;
           this.ready = false;
@@ -110,22 +181,47 @@ export class MusicBotWorker {
 
         // Wait for 'ready' with a hard timeout; a worker that cannot join is killed.
         await new Promise<void>((resolve, reject) => {
+          let settled = false;
           const timer = setTimeout(() => {
-            const detail = stderrTail.split('\n').filter(Boolean).slice(-3).join(' | ');
-            reject(new Error(`Music worker did not become ready in time (pid ${child.pid}).${detail ? ` Worker output: ${detail}` : ' No output captured.'}`));
+            if (settled) return;
+            settled = true;
+            // A wedged (alive but silent) worker must not leak: kill it.
+            try { child.kill('SIGKILL'); } catch { /* already dead */ }
+            reject(new Error(`Music worker did not become ready in ${READY_TIMEOUT_MS} ms (pid ${child.pid}).`));
           }, READY_TIMEOUT_MS);
-          const onReady = (message: any) => {
-            if (message?.type === 'ready') { clearTimeout(timer); resolve(); }
-            else if (message?.type === 'fatal' || message?.type === 'fatal-error') {
-              clearTimeout(timer);
-              reject(new Error(String(message.message || 'Worker failed to start')));
-            }
+
+          const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
           };
-          child.once('message', onReady);
-          child.once('exit', (code) => { clearTimeout(timer); reject(new Error(`Music worker exited during startup (code ${code})`)); });
+
+          child.once('message', function onStartupMessage(message: any) {
+            if (message?.type === 'ready') { clearTimeout(timer); resolve(); return; }
+            if (message?.type === 'fatal' || message?.type === 'fatal-error') {
+              const step = message.step ? ` (failed at step "${message.step}")` : '';
+              fail(new Error(`Music worker reported a fatal error during startup${step}: ${sanitizeText(String(message.message || 'unknown cause'))}`));
+            }
+          });
+
+          child.once('exit', (code, signal) => {
+            fail(this.startupExitError(code, signal, tails, spawnError));
+          });
         });
+
         this.ready = true;
         this.lastHeartbeatAt = Date.now();
+        breakerRecordSuccess(this.roomId);
+        console.log(`[MahyarMusic] worker ready for room ${this.roomId} (pid ${child.pid})`);
+      } catch (error) {
+        // Any startup failure feeds the per-room circuit breaker.
+        breakerRecordFailure(this.roomId);
+        if (error instanceof Error) {
+          this.lastStartupError = sanitizeText(error.message, this.secrets());
+          console.error(`[MahyarMusic] worker startup failed for room ${this.roomId}: ${this.lastStartupError}`);
+        }
+        throw error;
       } finally {
         this.starting = null;
       }
@@ -133,9 +229,44 @@ export class MusicBotWorker {
     return this.starting;
   }
 
+  /**
+   * Build a diagnosable error for a worker that exited before becoming ready:
+   * exit code AND termination signal, plus sanitized stdout/stderr tails.
+   * The same block is written to the server log so it lands in the Railway
+   * Deploy Logs verbatim.
+   */
+  private startupExitError(code: number | null, signal: NodeJS.Signals | null, tails: StreamTails, spawnError: Error | null): Error {
+    const reason = spawnError
+      ? `spawn failed: ${spawnError.message}`
+      : `exited during startup (code ${code ?? 'null'}, signal ${signal ?? 'none'})`;
+    const stdoutLines = tailSummary(sanitizeText(tails.stdout, this.secrets()));
+    const stderrLines = tailSummary(sanitizeText(tails.stderr, this.secrets()));
+
+    const detailLines = [
+      `[MahyarMusic] Music worker for room ${this.roomId} ${reason}.`,
+      stdoutLines ? `[MahyarMusic] worker stdout (tail): ${stdoutLines}` : '[MahyarMusic] worker stdout (tail): (empty)',
+      stderrLines ? `[MahyarMusic] worker stderr (tail): ${stderrLines}` : '[MahyarMusic] worker stderr (tail): (empty)',
+      '[MahyarMusic] Hint: a native module or ffmpeg problem shows the failing startup step in the lines above (step=<name> status=failed).'
+    ];
+    // Multi-line dump → visible in Railway Deploy Logs.
+    console.error(detailLines.join('\n'));
+
+    const summary = `Music worker ${reason}.${stdoutLines ? ` stdout: ${stdoutLines}` : ''}${stderrLines ? ` stderr: ${stderrLines}` : ''}`;
+    return new Error(summary.length > 1_200 ? `${summary.slice(0, 1_200)}…` : summary);
+  }
+
   private handleWorkerMessage(message: any) {
     if (!message || typeof message !== 'object') return;
     switch (message.type) {
+      case 'startup-log': {
+        // Per-step startup trace from the child — always logged (Railway Deploy Logs).
+        const step = String(message.step || '?');
+        const status = String(message.status || '?');
+        const detail = message.detail ? ` ${sanitizeText(String(message.detail), this.secrets())}` : '';
+        const line = `[MahyarMusic] worker ${this.roomId} startup ${status}: ${step}${detail}`;
+        if (status === 'failed') console.error(line); else console.log(line);
+        break;
+      }
       case 'ready':
         this.ready = true;
         this.lastHeartbeatAt = Date.now();
@@ -153,12 +284,12 @@ export class MusicBotWorker {
         break;
       case 'fatal-error':
         this.playingFlag = false;
-        this.events.onFatalError(String(message.message || 'Playback failed.'));
+        this.events.onFatalError(sanitizeText(String(message.message || 'Playback failed.'), this.secrets()));
         break;
       case 'disconnected':
         this.ready = false;
         this.playingFlag = false;
-        this.events.onConnectionLost(String(message.reason || 'LiveKit disconnected'));
+        this.events.onConnectionLost(sanitizeText(String(message.reason || 'LiveKit disconnected'), this.secrets()));
         break;
       case 'participants':
         this.humanCount = Math.max(0, Number(message.count) || 0);
@@ -168,13 +299,13 @@ export class MusicBotWorker {
         this.lastHeartbeatAt = Date.now();
         break;
       case 'decode-debug':
-        if (process.env.MUSIC_DEBUG) console.log(`[MahyarMusic][worker] ${message.message}`);
+        if (process.env.MUSIC_DEBUG) console.log(`[MahyarMusic][worker] ${sanitizeText(String(message.message || ''), this.secrets())}`);
         break;
       case 'fatal':
         // Worker cannot continue at all: treat like a lost connection.
         this.ready = false;
         this.playingFlag = false;
-        this.events.onConnectionLost(String(message.message || 'worker fatal'));
+        this.events.onConnectionLost(sanitizeText(String(message.message || 'worker fatal'), this.secrets()));
         break;
       default:
         break;
@@ -201,7 +332,7 @@ export class MusicBotWorker {
       }, READY_TIMEOUT_MS);
       const onMessage = (message: any) => {
         if (message?.type === 'playing') { clearTimeout(timer); child.removeListener('message', onMessage); resolve(); }
-        else if (message?.type === 'fatal-error') { clearTimeout(timer); child.removeListener('message', onMessage); reject(new Error(String(message.message))); }
+        else if (message?.type === 'fatal-error') { clearTimeout(timer); child.removeListener('message', onMessage); reject(new Error(sanitizeText(String(message.message), this.secrets()))); }
       };
       child.on('message', onMessage);
       this.send({ type: 'play', url, offset: offsetSeconds });

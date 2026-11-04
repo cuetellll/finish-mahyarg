@@ -218,16 +218,7 @@ railway run node scripts/bucket_cors.js --apply https://<your-app>.up.railway.ap
 
 The rule it writes: the given origins, methods `PUT, GET, HEAD`, headers `*`, `ETag` exposed, `MaxAgeSeconds=3000`. The app also exposes `GET /api/music/upload/diagnostics`, which reports whether a rule exists and whether the current origin may upload — that answer is what turns the opaque browser failure into a precise error message in the UI.
 
-### When the bucket refuses direct uploads (the fallback is live)
-
-Uploads work before any CORS configuration: if the browser's direct `PUT` to the bucket fails (network/CORS error), the same file is sent, without any user action, to the same-origin endpoint `POST /api/music/upload/stream`, which relays it into the bucket as a multipart upload.
-
-- The body is never buffered whole: one 8 MiB part of the incoming stream is in memory at a time (concurrency 1).
-- The size limit is enforced on `Content-Length` and again on the actual bytes; exceeding it aborts the multipart upload so no half-written object is left behind.
-- Authentication, server membership and the upload permission still come from `init` (via `upload_token`); content verification (HEAD + magic bytes + ffprobe), duplicate detection and the `MusicTrack` insert still come from `complete` — an interrupted relay creates no catalog row.
-- Cost: this path uses **application service egress**, unlike direct uploads. That is why direct uploads stay the preferred path and become active automatically once a CORS rule exists on the bucket.
-
-> **Honest status:** configuring CORS on a real Railway bucket has **not** been verified in this repository (no real credentials were available); the code and script follow the standard `PutBucketCORS` behaviour. The relay path has only been exercised locally against a stub S3 (part sizing, size cap, abort), not against the real Railway bucket.
+> **Honest status:** configuring CORS on a real Railway bucket has **not** been verified in this repository (no real credentials were available). The code and script follow the standard `PutBucketCORS` behaviour. If direct upload still fails in your environment, the fallback is streaming uploads through the application server, which raises application egress.
 
 ---
 

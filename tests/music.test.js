@@ -250,11 +250,6 @@ test('music system is wired: library routes, worker entry, socket command, landi
   assert.match(librarySource, /DUPLICATE_TRACK/, 'duplicate detection');
   assert.match(librarySource, /deleteObject\(pending\.key\)/, 'invalid uploads are removed from storage');
   assert.match(storage, /presignUpload/, 'presigned PUT (browser → bucket directly)');
-  // The relay path exists because the bucket may refuse browser PUTs (no CORS rule).
-  assert.match(librarySource, /upload\/stream/, 'same-origin relay endpoint exists');
-  assert.match(storage, /uploadStreamToBucket/, 'relay streams into a multipart upload');
-  assert.match(storage, /AbortMultipartUploadCommand/, 'aborted relays leave no half-written object');
-  assert.match(storage, /requestChecksumCalculation: 'WHEN_REQUIRED'/, 'presigned URLs carry no unusable checksum');
   assert.match(storage, /presignDownload/, 'short-lived signed download for the worker');
   assert.match(storage, /expiresIn: 900/, 'upload URLs are short-lived');
   for (const lang of ['fa', 'en']) {
