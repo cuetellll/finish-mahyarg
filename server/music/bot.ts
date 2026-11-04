@@ -71,6 +71,67 @@ function breakerRecordSuccess(roomId: string) {
 
 interface StreamTails { stdout: string; stderr: string }
 
+/**
+ * Wait for the worker's actual READY IPC message. Startup diagnostics are
+ * deliberately allowed to pass through without settling this promise.
+ *
+ * The worker also has a long-lived message handler owned by MusicBotWorker;
+ * this temporary waiter must therefore remove only its own listeners when it
+ * settles.
+ */
+export function waitForWorkerReady(
+  child: ChildProcess,
+  timeoutMs: number,
+  startupExitError: (code: number | null, signal: NodeJS.Signals | null) => Error,
+  startupFatalError: (message: any) => Error
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.removeListener('message', onStartupMessage);
+      child.removeListener('exit', onStartupExit);
+      child.removeListener('error', onStartupError);
+    };
+
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error); else resolve();
+    };
+
+    const onStartupMessage = (message: any) => {
+      if (message?.type === 'ready') {
+        settle();
+      } else if (message?.type === 'fatal' || message?.type === 'fatal-error') {
+        settle(startupFatalError(message));
+      }
+    };
+
+    const onStartupExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      settle(startupExitError(code, signal));
+    };
+
+    const onStartupError = (error: Error) => {
+      settle(error);
+    };
+
+    // Do not use once('message'): startup-log messages precede READY.
+    child.on('message', onStartupMessage);
+    child.once('exit', onStartupExit);
+    child.once('error', onStartupError);
+    timer = setTimeout(() => {
+      const error = new Error(`Music worker did not become ready in ${timeoutMs} ms (pid ${child.pid}).`);
+      settle(error);
+      // A wedged (alive but silent) worker must not leak.
+      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+    }, timeoutMs);
+  });
+}
+
 export class MusicBotWorker {
   readonly identity: string;
   private child: ChildProcess | null = null;
@@ -179,36 +240,17 @@ export class MusicBotWorker {
           if (wasReady) this.events.onConnectionLost(`worker exited (code ${code} ${signal || ''})`.trim());
         });
 
-        // Wait for 'ready' with a hard timeout; a worker that cannot join is killed.
-        await new Promise<void>((resolve, reject) => {
-          let settled = false;
-          const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            // A wedged (alive but silent) worker must not leak: kill it.
-            try { child.kill('SIGKILL'); } catch { /* already dead */ }
-            reject(new Error(`Music worker did not become ready in ${READY_TIMEOUT_MS} ms (pid ${child.pid}).`));
-          }, READY_TIMEOUT_MS);
-
-          const fail = (error: Error) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            reject(error);
-          };
-
-          child.once('message', function onStartupMessage(message: any) {
-            if (message?.type === 'ready') { clearTimeout(timer); resolve(); return; }
-            if (message?.type === 'fatal' || message?.type === 'fatal-error') {
-              const step = message.step ? ` (failed at step "${message.step}")` : '';
-              fail(new Error(`Music worker reported a fatal error during startup${step}: ${sanitizeText(String(message.message || 'unknown cause'))}`));
-            }
-          });
-
-          child.once('exit', (code, signal) => {
-            fail(this.startupExitError(code, signal, tails, spawnError));
-          });
-        });
+        // Wait for the actual 'ready' message with a hard timeout; startup-log
+        // messages must not consume the handshake listener.
+        await waitForWorkerReady(
+          child,
+          READY_TIMEOUT_MS,
+          (code, signal) => this.startupExitError(code, signal, tails, spawnError),
+          (message) => {
+            const step = message.step ? ` (failed at step "${message.step}")` : '';
+            return new Error(`Music worker reported a fatal error during startup${step}: ${sanitizeText(String(message.message || 'unknown cause'))}`);
+          }
+        );
 
         this.ready = true;
         this.lastHeartbeatAt = Date.now();

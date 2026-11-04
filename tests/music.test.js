@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 
 function loadMusicClient() {
   const context = { window: {}, console };
@@ -47,6 +48,83 @@ test('music client is a bot identity detector, not a guesser', () => {
   assert.equal(music.constructor.isBotIdentity('user_someone'), false);
   assert.equal(music.constructor.isBotIdentity(''), false);
   assert.equal(music.constructor.isBotIdentity(undefined), false);
+});
+
+// ---------------------------------------------------------------------------
+// Parent ↔ worker startup handshake regression coverage
+// ---------------------------------------------------------------------------
+const { waitForWorkerReady } = require('../dist/server/music/bot.js');
+
+class FakeWorker extends EventEmitter {
+  constructor() {
+    super();
+    this.pid = 4242;
+    this.killedWith = null;
+  }
+
+  kill(signal) {
+    this.killedWith = signal;
+    return true;
+  }
+}
+
+function startupFatal(message) {
+  const step = message.step ? ` (failed at step "${message.step}")` : '';
+  return new Error(`Music worker reported a fatal error during startup${step}: ${message.message || 'unknown cause'}`);
+}
+
+test('worker startup ignores startup-log messages and resolves only on READY', async () => {
+  const child = new FakeWorker();
+  let generalReadyMessages = 0;
+  child.on('message', (message) => { if (message.type === 'ready') generalReadyMessages += 1; });
+  const startup = waitForWorkerReady(child, 100, () => new Error('unexpected exit'), startupFatal);
+
+  for (const step of ['process-init', 'native-module-load', 'ffmpeg-discovery', 'track-publish']) {
+    child.emit('message', { type: 'startup-log', step, status: 'ok' });
+  }
+  assert.equal(child.listenerCount('message'), 2, 'general handler and startup waiter coexist');
+
+  child.emit('message', { type: 'ready' });
+  await startup;
+
+  assert.equal(generalReadyMessages, 1, 'general worker-state handler still receives READY');
+  assert.equal(child.killedWith, null, 'ready worker is not killed by startup timeout');
+  assert.equal(child.listenerCount('message'), 1, 'temporary message listener is removed');
+  assert.equal(child.listenerCount('exit'), 0, 'temporary exit listener is removed');
+  assert.equal(child.listenerCount('error'), 0, 'temporary error listener is removed');
+});
+
+test('worker startup rejects fatal messages and cleans up temporary listeners', async () => {
+  const child = new FakeWorker();
+  const startup = waitForWorkerReady(child, 100, () => new Error('unexpected exit'), startupFatal);
+  child.emit('message', { type: 'fatal', step: 'track-publish', message: 'publish failed' });
+  await assert.rejects(startup, /track-publish/);
+  assert.equal(child.listenerCount('message'), 0);
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(child.listenerCount('error'), 0);
+});
+
+test('worker startup rejects on pre-READY exit and on genuine timeout', async () => {
+  const exited = new FakeWorker();
+  const exitStartup = waitForWorkerReady(exited, 100, (code, signal) => new Error(`exited ${code}/${signal}`), startupFatal);
+  exited.emit('exit', 1, null);
+  await assert.rejects(exitStartup, /exited 1\/null/);
+  assert.equal(exited.listenerCount('message'), 0);
+
+  const timedOut = new FakeWorker();
+  const timeoutStartup = waitForWorkerReady(timedOut, 10, () => new Error('unexpected exit'), startupFatal);
+  await assert.rejects(timeoutStartup, /did not become ready in 10 ms/);
+  assert.equal(timedOut.killedWith, 'SIGKILL');
+  assert.equal(timedOut.listenerCount('message'), 0);
+  assert.equal(timedOut.listenerCount('exit'), 0);
+  assert.equal(timedOut.listenerCount('error'), 0);
+});
+
+test('worker startup keeps the in-flight guard and persistent IPC handshake', () => {
+  const botSource = fs.readFileSync(path.join(__dirname, '../server/music/bot.ts'), 'utf8');
+  assert.match(botSource, /if \(this\.starting\) return this\.starting/, 'concurrent callers share one worker startup');
+  assert.match(botSource, /child\.on\('message', onStartupMessage\)/, 'startup waiter listens past diagnostic messages');
+  assert.doesNotMatch(botSource, /child\.once\('message', onStartupMessage\)/, 'startup waiter is not one-shot');
 });
 
 // ---------------------------------------------------------------------------
